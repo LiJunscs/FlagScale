@@ -25,7 +25,7 @@ experiment:
     per_node_task: false
     no_shared_fs: false
     backend: torchrun
-    nnodes: 3
+    nnodes: 2
     nproc_per_node: 8
     hostfile: hostfile # Select an available hostfile. Like ip_1 slosts=8\nip_2 slost=8...
     master_port: 10720 # Select an available port.
