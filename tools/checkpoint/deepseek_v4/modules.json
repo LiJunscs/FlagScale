@@ -1,0 +1,560 @@
+{
+  "schema_version": 1,
+  "profile": "deepseek_v4",
+  "revision": "dsv4-global-v1",
+  "rules": [
+    {
+      "id": "embedding",
+      "scope": "root",
+      "hf": [
+        "embed.weight"
+      ],
+      "mcore": [
+        "embedding.word_embeddings.weight"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "output",
+      "scope": "root",
+      "hf": [
+        "head.weight"
+      ],
+      "mcore": [
+        "output_layer.weight"
+      ],
+      "op": "identity",
+      "te": true
+    },
+    {
+      "id": "final_norm",
+      "scope": "root",
+      "hf": [
+        "norm.weight"
+      ],
+      "mcore": [
+        "decoder.final_layernorm.weight"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "head_fn",
+      "scope": "root",
+      "hf": [
+        "hc_head_fn"
+      ],
+      "mcore": [
+        "decoder.hc_head_fn"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "head_base",
+      "scope": "root",
+      "hf": [
+        "hc_head_base"
+      ],
+      "mcore": [
+        "decoder.hc_head_base"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "head_scale",
+      "scope": "root",
+      "hf": [
+        "hc_head_scale"
+      ],
+      "mcore": [
+        "decoder.hc_head_scale"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "attn_norm",
+      "scope": "layer",
+      "hf": [
+        "attn_norm.weight"
+      ],
+      "mcore": [
+        "input_layernorm.weight"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "ffn_norm",
+      "scope": "layer",
+      "hf": [
+        "ffn_norm.weight"
+      ],
+      "mcore": [
+        "pre_mlp_layernorm.weight"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "q_down",
+      "scope": "layer",
+      "hf": [
+        "attn.wq_a.weight"
+      ],
+      "mcore": [
+        "self_attention.linear_q_down_proj.weight"
+      ],
+      "op": "identity",
+      "te": true
+    },
+    {
+      "id": "q_norm",
+      "scope": "layer",
+      "hf": [
+        "attn.q_norm.weight"
+      ],
+      "mcore": [
+        "self_attention.q_layernorm.weight"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "q_up",
+      "scope": "layer",
+      "hf": [
+        "attn.wq_b.weight"
+      ],
+      "mcore": [
+        "self_attention.linear_q_up_proj.weight"
+      ],
+      "op": "identity",
+      "te": true
+    },
+    {
+      "id": "kv",
+      "scope": "layer",
+      "hf": [
+        "attn.wkv.weight"
+      ],
+      "mcore": [
+        "self_attention.linear_kv_proj.weight"
+      ],
+      "op": "identity",
+      "te": true
+    },
+    {
+      "id": "kv_norm",
+      "scope": "layer",
+      "hf": [
+        "attn.kv_norm.weight"
+      ],
+      "mcore": [
+        "self_attention.kv_layernorm.weight"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "o_group",
+      "scope": "layer",
+      "hf": [
+        "attn.wo_a.weight"
+      ],
+      "mcore": [
+        "self_attention.linear_o_group_proj"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "o_proj",
+      "scope": "layer",
+      "hf": [
+        "attn.wo_b.weight"
+      ],
+      "mcore": [
+        "self_attention.linear_proj.weight"
+      ],
+      "op": "identity",
+      "te": true
+    },
+    {
+      "id": "sink",
+      "scope": "layer",
+      "hf": [
+        "attn.attn_sink"
+      ],
+      "mcore": [
+        "self_attention.core_attention.attn_sink"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "compress_kv",
+      "scope": "layer",
+      "when": "compressor",
+      "hf": [
+        "attn.compressor.wkv.weight"
+      ],
+      "mcore": [
+        "self_attention.core_attention.compressor.linear_wkv.weight"
+      ],
+      "op": "identity",
+      "te": true
+    },
+    {
+      "id": "compress_gate",
+      "scope": "layer",
+      "when": "compressor",
+      "hf": [
+        "attn.compressor.wgate.weight"
+      ],
+      "mcore": [
+        "self_attention.core_attention.compressor.linear_wgate.weight"
+      ],
+      "op": "identity",
+      "te": true
+    },
+    {
+      "id": "compress_ape",
+      "scope": "layer",
+      "when": "compressor",
+      "hf": [
+        "attn.compressor.ape"
+      ],
+      "mcore": [
+        "self_attention.core_attention.compressor.ape"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "compress_norm",
+      "scope": "layer",
+      "when": "compressor",
+      "hf": [
+        "attn.compressor.norm.weight"
+      ],
+      "mcore": [
+        "self_attention.core_attention.compressor.norm.weight"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "index_q",
+      "scope": "layer",
+      "when": "indexer",
+      "hf": [
+        "attn.indexer.wq_b.weight"
+      ],
+      "mcore": [
+        "self_attention.core_attention.indexer.linear_wq_b.weight"
+      ],
+      "op": "identity",
+      "te": true
+    },
+    {
+      "id": "index_score",
+      "scope": "layer",
+      "when": "indexer",
+      "hf": [
+        "attn.indexer.scorer.weights_proj.weight"
+      ],
+      "mcore": [
+        "self_attention.core_attention.indexer.linear_weights_proj.weight"
+      ],
+      "op": "identity",
+      "te": true
+    },
+    {
+      "id": "index_compress_kv",
+      "scope": "layer",
+      "when": "indexer",
+      "hf": [
+        "attn.indexer.compressor.wkv.weight"
+      ],
+      "mcore": [
+        "self_attention.core_attention.indexer.compressor.linear_wkv.weight"
+      ],
+      "op": "identity",
+      "te": true
+    },
+    {
+      "id": "index_compress_gate",
+      "scope": "layer",
+      "when": "indexer",
+      "hf": [
+        "attn.indexer.compressor.wgate.weight"
+      ],
+      "mcore": [
+        "self_attention.core_attention.indexer.compressor.linear_wgate.weight"
+      ],
+      "op": "identity",
+      "te": true
+    },
+    {
+      "id": "index_compress_ape",
+      "scope": "layer",
+      "when": "indexer",
+      "hf": [
+        "attn.indexer.compressor.ape"
+      ],
+      "mcore": [
+        "self_attention.core_attention.indexer.compressor.ape"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "index_compress_norm",
+      "scope": "layer",
+      "when": "indexer",
+      "hf": [
+        "attn.indexer.compressor.norm.weight"
+      ],
+      "mcore": [
+        "self_attention.core_attention.indexer.compressor.norm.weight"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "router",
+      "scope": "layer",
+      "hf": [
+        "ffn.gate.weight"
+      ],
+      "mcore": [
+        "mlp.router.weight"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "router_bias",
+      "scope": "layer",
+      "when": "non_hash",
+      "optional": true,
+      "hf": [
+        "ffn.gate.bias"
+      ],
+      "mcore": [
+        "mlp.router.expert_bias"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "hash_router",
+      "scope": "layer",
+      "when": "hash",
+      "hf": [
+        "ffn.gate.tid2eid"
+      ],
+      "mcore": [
+        "mlp.router.tid2eid"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "expert_fc1",
+      "scope": "layer",
+      "hf": [
+        "ffn.experts.{expert}.w1.weight",
+        "ffn.experts.{expert}.w3.weight"
+      ],
+      "mcore": [
+        "mlp.experts.linear_fc1.weight{expert}"
+      ],
+      "op": "expert_swiglu",
+      "te": true
+    },
+    {
+      "id": "expert_fc2",
+      "scope": "layer",
+      "hf": [
+        "ffn.experts.{expert}.w2.weight"
+      ],
+      "mcore": [
+        "mlp.experts.linear_fc2.weight{expert}"
+      ],
+      "op": "expert",
+      "te": true
+    },
+    {
+      "id": "shared_fc1",
+      "scope": "layer",
+      "hf": [
+        "ffn.shared_experts.w1.weight",
+        "ffn.shared_experts.w3.weight"
+      ],
+      "mcore": [
+        "mlp.shared_experts.linear_fc1.weight"
+      ],
+      "op": "swiglu",
+      "te": true
+    },
+    {
+      "id": "shared_fc2",
+      "scope": "layer",
+      "hf": [
+        "ffn.shared_experts.w2.weight"
+      ],
+      "mcore": [
+        "mlp.shared_experts.linear_fc2.weight"
+      ],
+      "op": "identity",
+      "te": true
+    },
+    {
+      "id": "hc_attn_fn",
+      "scope": "layer",
+      "hf": [
+        "hc_attn_fn"
+      ],
+      "mcore": [
+        "self_attention_hyper_connection.mapping_proj.weight"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "hc_attn_base",
+      "scope": "layer",
+      "hf": [
+        "hc_attn_base"
+      ],
+      "mcore": [
+        "self_attention_hyper_connection.bias"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "hc_attn_scale",
+      "scope": "layer",
+      "hf": [
+        "hc_attn_scale"
+      ],
+      "mcore": [
+        "self_attention_hyper_connection.alpha_pre",
+        "self_attention_hyper_connection.alpha_post",
+        "self_attention_hyper_connection.alpha_res"
+      ],
+      "op": "hc_scale"
+    },
+    {
+      "id": "hc_ffn_fn",
+      "scope": "layer",
+      "hf": [
+        "hc_ffn_fn"
+      ],
+      "mcore": [
+        "mlp_hyper_connection.mapping_proj.weight"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "hc_ffn_base",
+      "scope": "layer",
+      "hf": [
+        "hc_ffn_base"
+      ],
+      "mcore": [
+        "mlp_hyper_connection.bias"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "hc_ffn_scale",
+      "scope": "layer",
+      "hf": [
+        "hc_ffn_scale"
+      ],
+      "mcore": [
+        "mlp_hyper_connection.alpha_pre",
+        "mlp_hyper_connection.alpha_post",
+        "mlp_hyper_connection.alpha_res"
+      ],
+      "op": "hc_scale"
+    },
+    {
+      "id": "mtp_enorm",
+      "scope": "mtp",
+      "hf": [
+        "enorm.weight"
+      ],
+      "mcore": [
+        "enorm.weight"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "mtp_hnorm",
+      "scope": "mtp",
+      "hf": [
+        "hnorm.weight"
+      ],
+      "mcore": [
+        "hnorm.weight"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "mtp_norm",
+      "scope": "mtp",
+      "hf": [
+        "norm.weight"
+      ],
+      "mcore": [
+        "final_layernorm.weight"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "mtp_e_proj",
+      "scope": "mtp",
+      "hf": [
+        "e_proj.weight"
+      ],
+      "mcore": [
+        "e_proj.weight"
+      ],
+      "op": "identity",
+      "te": true
+    },
+    {
+      "id": "mtp_h_proj",
+      "scope": "mtp",
+      "hf": [
+        "h_proj.weight"
+      ],
+      "mcore": [
+        "h_proj.weight"
+      ],
+      "op": "identity",
+      "te": true
+    },
+    {
+      "id": "mtp_head_fn",
+      "scope": "mtp",
+      "hf": [
+        "hc_head_fn"
+      ],
+      "mcore": [
+        "hc_head_fn"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "mtp_head_base",
+      "scope": "mtp",
+      "hf": [
+        "hc_head_base"
+      ],
+      "mcore": [
+        "hc_head_base"
+      ],
+      "op": "identity"
+    },
+    {
+      "id": "mtp_head_scale",
+      "scope": "mtp",
+      "hf": [
+        "hc_head_scale"
+      ],
+      "mcore": [
+        "hc_head_scale"
+      ],
+      "op": "identity"
+    }
+  ]
+}
