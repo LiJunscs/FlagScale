@@ -3097,6 +3097,8 @@ def training_log(
             elapsed_time_per_iteration * 10**12 * args.world_size
         )
 
+        token_thoughput = args.global_batch_size * args.seq_length / (elapsed_time_per_iteration * 10**12 * args.world_size)
+
         one_logger_utils.track_e2e_metrics(args.log_throughput, throughput)
 
         # We log to stdout after the first iteration (controlled by `is_first_iteration`)
@@ -3119,6 +3121,7 @@ def training_log(
         )
         if args.log_throughput:
             log_string += f' throughput per GPU (TFLOP/s/GPU): {throughput:.1f} |'
+            log_string += f'token thoughput per GPU (Tokens/s/GPU): {token_thoughput:.1f}'
             if args.log_timers_to_tensorboard:
                 if writer:
                     writer.add_scalar('throughput', throughput, iteration)

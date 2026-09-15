@@ -257,9 +257,6 @@ class FSTrainArguments:
 
                 accumulated_world_size += temp_world_size
                 current_process_mesh_idx += 1
-        # DeepSeek-V4 Temporary
-        if self.args.experimental_attention_variant == "dsv4_hybrid":
-            assert self.args.context_parallel_size == 1, "Context parallelism is not supported with dsv4_hybrid attention variant yet!"
 
     def post_validate_args(self):
         """Post-validate the arguments after Megatron function `validate_args`."""

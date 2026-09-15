@@ -121,6 +121,20 @@ def compute_weight_and_optimizer_memory(args, verbose=False):
         if shared_expert_ffn_hidden_size > 0 and getattr(args, "moe_shared_expert_gate", False)
         else 0
     )
+    hc_mult = args.num_residual_streams if args.enable_hyper_connections else 1
+    num_engram_layers = len(args.engram_layers_id)
+    num_engram_parameters = (
+        sum(args.engram_vocab_size) * args.n_embed_per_ngram * args.max_ngram_size # Embedding
+        + 
+        (
+            (args.hidden_size * hc_mult * args.hidden_size * args.engram_kernel_size + args.hidden_size * hc_mult)  # ShortConv(Conv1d + hc_mult * norm)
+            + args.hidden_size * (args.max_ngram_size -1) * args.n_embed_per_ngram # value_proj (hidden_size * engram_hidden_size)
+            + (args.hidden_size * (args.max_ngram_size -1) * args.n_embed_per_ngram) * hc_mult # keys_proj (hidden_size * engram_hidden_size) * hc_mult
+            + args.hidden_size * hc_mult * 2 # Norm 1 + Norm 2
+        ) * num_engram_layers
+    )
+    if not args.use_engram:
+        num_engram_parameters = 0
 
     num_parameters_in_transformer_layer_dense = (
         attention_params + dense_mlp_params + layernorm_params
@@ -145,6 +159,7 @@ def compute_weight_and_optimizer_memory(args, verbose=False):
         num_parameters_in_transformer_layer_dense * num_dense_layers
         + num_parameters_in_transformer_layer_moe * num_moe_layers
         + final_layernorm
+        + num_engram_parameters
     )
     num_active_parameters_in_transformer_block = (
         num_parameters_in_transformer_layer_dense * num_dense_layers
@@ -182,6 +197,10 @@ def compute_weight_and_optimizer_memory(args, verbose=False):
         print(
             f"Number of parameters in embedding layers in billions: "
             f"{num_parameters_in_embedding_layers / 10**9:.2f}"
+        )
+        print(
+            f"Number of parameters in engram modules in billions: "
+            f"{num_engram_parameters / 10**9:.2f}"
         )
         print(f"Total number of parameters in billions: {num_total_parameters / 10**9:.2f}")
         print(f"Total number of active parameters in billions: {num_active_parameters / 10**9:.2f}")
