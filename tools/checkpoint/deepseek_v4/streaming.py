@@ -436,15 +436,22 @@ class StreamingCheckpointReader:
     def _validate_metadata(self):
         ignored = ("optimizer", "rng_state", "rerun_state_machine", "opt_param_scheduler",
                    "common_state", "num_floating_point_operations_so_far")
+
+        def _is_ignored(key: str) -> bool:
+            if any(key == prefix or key.startswith(prefix + ".") or key.startswith(prefix + "/")
+                   for prefix in ignored):
+                return True
+            # Megatron training saves persist trainer rerun-state bytes as
+            # rerun_state_machine_state/shard_<r>_<world> — trainer metadata,
+            # not model tensors. Accept it like the other ignored prefixes.
+            return key.startswith("rerun_state_machine_state/")
+
         unknown = []
         for key, entry in self.metadata.state_dict_metadata.items():
             if self.skip_mtp and is_mcore_mtp_key(key):
                 continue
             if key not in self.groups:
-                if not is_extra_state(key) and not any(
-                    key == prefix or key.startswith(prefix + ".") or key.startswith(prefix + "/")
-                    for prefix in ignored
-                ):
+                if not is_extra_state(key) and not _is_ignored(key):
                     unknown.append(key)
                 continue
             if not isinstance(entry, TensorStorageMetadata):

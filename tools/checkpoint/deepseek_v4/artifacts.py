@@ -116,11 +116,17 @@ def read_mcore_artifacts(path):
     from torch.distributed.checkpoint.metadata import TensorStorageMetadata
 
     directory = resolve_iteration_dir(path)
-    # common.pt is an existing training pickle, containing Namespace defaults.
-    # .distcp model/optimizer tensor payloads are not read here.
-    common = torch.load(directory / "common.pt", map_location="cpu", weights_only=False)
+    # Common (non-sharded) state is read with the official reader, which is
+    # format-transparent: standalone common.pt (legacy torch save) or the
+    # common_state ShardedObject inside the DCP payload (fork torch_dist
+    # save). .distcp model/optimizer tensor payloads are not read here.
+    from megatron.core.dist_checkpointing.serialization import (
+        load_common_state_dict,
+    )
+
+    common = load_common_state_dict(str(directory))
     if not isinstance(common, dict) or "args" not in common:
-        raise MappingError("Existing MCore checkpoint must contain common.pt['args']")
+        raise MappingError("Existing MCore checkpoint must contain common state args")
     saved = common["args"]
     raw_args = dict(saved) if isinstance(saved, dict) else dict(vars(saved))
     values, omitted = json_args(raw_args)
