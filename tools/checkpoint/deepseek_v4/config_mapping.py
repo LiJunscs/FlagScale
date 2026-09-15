@@ -218,7 +218,7 @@ def _check_hf(config):
         raise MappingError("Expert top-k exceeds the number of experts")
 
 
-def mcore_to_hf_config(args, template):
+def mcore_to_hf_config(args, template, *, vocab_size_override=None):
     template, ignored = strip_inference_config(template)
     _check_mcore(args)
     _check_hf(template)
@@ -242,10 +242,17 @@ def mcore_to_hf_config(args, template):
         _record(rows, hf, aliases, "copy", template.get(hf), value)
     # Embedding, output and tid2eid share this unpadded row count. The streaming
     # reader crops stored padding; neither padded size nor an unrelated HF
-    # reference can establish the source model's real vocabulary.
+    # reference can establish the source model's real vocabulary. Checkpoints
+    # produced by --use-checkpoint-args carry vocab_size=None (the unpadded
+    # value is not recoverable from mcore state), so it must be supplied
+    # explicitly via --vocab-size for such sources.
     vocab = _get(args, ("vocab_size",))
+    if vocab is None and vocab_size_override is not None:
+        vocab = int(vocab_size_override)
+        _record(rows, "vocab_size", (), "cli_vocab_size_override", template.get("vocab_size"), vocab)
     if vocab is None:
-        raise MappingError("MCore-to-HF requires the source model's unpadded args.vocab_size; "
+        raise MappingError("MCore-to-HF requires the source model's unpadded vocab_size "
+                           "(checkpoint args.vocab_size is None; pass --vocab-size); "
                            "padded_vocab_size cannot determine how many rows to trim")
     result["vocab_size"] = int(vocab)
     _record(rows, "vocab_size", ("vocab_size",), "copy_unpadded_vocab_size",
@@ -392,7 +399,7 @@ def hf_to_mcore_args(config):
     return result, rows
 
 
-def translate_configs(hf, mcore=None):
+def translate_configs(hf, mcore=None, *, vocab_size_override=None):
     exported_mcore, forward = hf_to_mcore_args(hf)
     result = {
         "revision": REVISION,
@@ -401,7 +408,7 @@ def translate_configs(hf, mcore=None):
         "precision": "HF storage quantization is handled separately; MCore fp8/fp4 training recipes are not HF byte formats",
     }
     if mcore is not None:
-        exported_hf, reverse = mcore_to_hf_config(mcore, hf)
+        exported_hf, reverse = mcore_to_hf_config(mcore, hf, vocab_size_override=vocab_size_override)
         result.update(
             mcore_to_hf={"target_config": exported_hf, "fields": reverse},
             hf_template_only_fields=sorted(set(hf) - {row["hf"].split(".")[0] for row in reverse}),

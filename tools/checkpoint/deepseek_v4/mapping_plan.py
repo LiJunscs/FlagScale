@@ -154,7 +154,7 @@ def emit_plan_warnings(plan):
 
 
 def prepare_mapping_plan(hf_path, checkpoint_path=None, override=None, *, hf_headers=False, rules=None,
-                         emit_warnings=True):
+                         emit_warnings=True, vocab_size_override=None):
     require_world_one()
     if rules is not None and override:
         raise MappingError("Cannot override frozen mapping rules")
@@ -170,6 +170,9 @@ def prepare_mapping_plan(hf_path, checkpoint_path=None, override=None, *, hf_hea
     if ignored_config:
         notes.append({"code": "ignored_inference_config", "fields": ignored_config,
                       "message": "Ignoring unsupported inference-only HF config fields: " + ", ".join(ignored_config)})
+    if vocab_size_override is not None and mc_args is not None:
+        mc_args = dict(mc_args)
+        mc_args["vocab_size"] = int(vocab_size_override)
     reader = SafetensorMetadataReader(hf_path) if hf_headers else None
     headers = None
     if reader is not None:
@@ -259,7 +262,7 @@ def prepare_mapping_plan(hf_path, checkpoint_path=None, override=None, *, hf_hea
         emit_plan_warnings(plan)
     return plan
 
-def load_mapping_plan(path, hf_path, checkpoint_path=None):
+def load_mapping_plan(path, hf_path, checkpoint_path=None, *, vocab_size_override=None):
     def unique_object(pairs):
         result = {}
         for key, value in pairs:
@@ -275,7 +278,8 @@ def load_mapping_plan(path, hf_path, checkpoint_path=None):
     if plan.get("mode") != mode:
         raise MappingError(f"Mapping plan is not for {mode}; regenerate it for the actual source")
     current = prepare_mapping_plan(hf_path, checkpoint_path, rules=plan["rules"],
-                                   hf_headers=plan["hf"]["headers"] is not None, emit_warnings=False)
+                                   hf_headers=plan["hf"]["headers"] is not None, emit_warnings=False,
+                                   vocab_size_override=vocab_size_override)
     # Compare structural content directly, never hash files. Re-reading small
     # metadata also rejects stale args, names, dimensions and edited plan regions.
     if current != plan:

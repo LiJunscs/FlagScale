@@ -69,12 +69,17 @@ def _staged_output(path, overwrite, inputs):
 
 def _plan(args, reference):
     headers = args.hf_headers
+    vocab_override = getattr(args, "vocab_size", None)
+    if args.command != "mcore-to-hf" and vocab_override is not None:
+        raise MappingError("--vocab-size only applies to mcore-to-hf")
     if args.mapping_plan:
-        plan = load_mapping_plan(args.mapping_plan, args.hf_model, reference)
+        plan = load_mapping_plan(args.mapping_plan, args.hf_model, reference,
+                                 vocab_size_override=vocab_override)
         if headers and plan["hf"]["headers"] is None:
             raise MappingError("Regenerate the plan with --hf-headers to use observed storage types")
         return plan
-    return prepare_mapping_plan(args.hf_model, reference, args.mapping_override, hf_headers=headers)
+    return prepare_mapping_plan(args.hf_model, reference, args.mapping_override, hf_headers=headers,
+                                vocab_size_override=vocab_override)
 
 
 def _prepare_conversion(args, plan, to_mcore):
@@ -214,6 +219,10 @@ def _add_common(parser, *, mcore_path_required=True):
                              "non-FP32 tensors; fp8 (hf-to-mcore only): store quantized weights as "
                              "native TE Float8BlockwiseQTensor payloads for native-FP8 training")
     parser.add_argument("--device", default="auto", help="Device for decoding arithmetic, not a storage capability filter")
+    parser.add_argument("--vocab-size", type=int, default=None,
+                        help="mcore-to-hf only: source model's unpadded vocab_size. Required when the "
+                             "checkpoint was produced with --use-checkpoint-args (args.vocab_size=None "
+                             "is not recoverable from MCore state)")
     parser.add_argument("--dry-run", action="store_true", help="Validate metadata only; do not load tensor values")
     parser.add_argument("--overwrite", action="store_true")
 
