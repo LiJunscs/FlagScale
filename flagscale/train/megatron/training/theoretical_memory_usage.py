@@ -122,9 +122,9 @@ def compute_weight_and_optimizer_memory(args, verbose=False):
         else 0
     )
     hc_mult = args.num_residual_streams if args.enable_hyper_connections else 1
-    num_engram_layers = len(args.engram_layers_id)
+    num_engram_layers = len(args.engram_layer_ids)
     num_engram_parameters = (
-        sum(args.engram_vocab_size) * args.n_embed_per_ngram * args.max_ngram_size # Embedding
+        sum(args.engram_vocab_size) * args.n_embed_per_ngram * (args.max_ngram_size - 1) # Embedding
         + 
         (
             (args.hidden_size * hc_mult * args.hidden_size * args.engram_kernel_size + args.hidden_size * hc_mult)  # ShortConv(Conv1d + hc_mult * norm)
