@@ -33,11 +33,13 @@ DSv4 不再维护独立的 `parameters.yaml`。常见参数、MLA 投影、路�
 
 新增模型参数的维护规则：无歧义的 HF↔MCore 字段对应加入公共 `parameters.yaml`，源字段不存在时跳过；模型特有默认值、派生值和不同语义留在模型覆盖中。例如公共 `head_dim → kv_channels`，DSv4 覆盖为 `head_dim → v_head_dim`；DSv4 的 `sliding_window → csa_window_size` 也留在模型文件。公共字典的增长不应隐式启用新模块或注入其他模型的默认值。
 
-既有未追踪的 DSv4 文档和加载示例未修改，其旧导入路径不再适用于本版；本文件描述当前入口。
+本文件是这套 HF ↔ MCore 转换框架的统一使用文档。DSv4 的旧 README 已移除；旧评审记录和加载示例不能作为当前命令行接口说明。
 
 ## 使用
 
-从仓库根目录执行，转换进程为 world size 1、rank 0：
+从仓库根目录执行，直接使用 `python -m`，不要通过多 rank launcher 启动。转换进程必须为 world size 1、rank 0。
+
+只需指定模型的 `mapping.yaml`，公共权重表和参数表通过 `extends` 自动加载。例如 Qwen3：
 
 ```bash
 python -m tools.checkpoint.hf_mcore_dist.convert hf-to-mcore \
@@ -54,23 +56,76 @@ python -m tools.checkpoint.hf_mcore_dist.convert mcore-to-hf \
 - `preserve`：量化矩阵作为完整 payload/scale 区域保存，支持拼接、专家堆叠及混合 dtype 融合，要求 `--dtype auto`。不会为任意切片、permute 或 reshape 隐式重新计算 scale；无法保留原编码的布局在写入前报错，需使用 dense。
 - 反向默认跟随实际源存储：普通 DCP 导出浮点，preserve DCP 导出原编码；可显式用 `--conversion-mode dense --dtype fp32` 解码导出。原始编码按实际 DCP 区域绑定，用户交换同形参数时也按声明执行。当前入口不导入历史原生 TE pickle checkpoint；TE/归档工具仍是公共模块中的底层 API。
 
-DSv4 使用相同命令及参数：
+### DSv4：HF → MCore
+
+生成普通 BF16 DCP；已有 FP32 参数和整数 tensor 保持原类型：
 
 ```bash
 python -m tools.checkpoint.hf_mcore_dist.convert hf-to-mcore \
   --mapping tools/checkpoint/deepseek_v4/mapping.yaml \
-  --source /models/dsv4 --output /outputs/dsv4 \
-  --conversion-mode preserve --device cpu
-
-python -m tools.checkpoint.hf_mcore_dist.convert mcore-to-hf \
-  --source /outputs/dsv4 --output /outputs/dsv4-hf
+  --source /models/dsv4-hf \
+  --output /outputs/dsv4-mcore \
+  --conversion-mode dense --dtype bf16 \
+  --device cpu --max-shard-size 4GB
 ```
+
+保留原始 FP8/MXFP4 payload 和 scale：
+
+```bash
+python -m tools.checkpoint.hf_mcore_dist.convert hf-to-mcore \
+  --mapping tools/checkpoint/deepseek_v4/mapping.yaml \
+  --source /models/dsv4-hf \
+  --output /outputs/dsv4-preserved \
+  --conversion-mode preserve --dtype auto \
+  --device cpu --max-shard-size 4GB
+```
+
+源 HF 目录需有 `config.json` 和实际 safetensors 权重；多分片通过 `model.safetensors.index.json` 定位，也支持单文件 `model.safetensors`。不需要构造 HF 模型或提供另一个 MCore checkpoint。
+
+### DSv4：MCore → HF
+
+导出训练后的 checkpoint，显式指定映射及可选 HF 附属文件目录：
+
+```bash
+python -m tools.checkpoint.hf_mcore_dist.convert mcore-to-hf \
+  --mapping tools/checkpoint/deepseek_v4/mapping.yaml \
+  --source /checkpoints/dsv4/iter_0000100 \
+  --hf-reference /models/dsv4-hf \
+  --output /outputs/dsv4-export \
+  --dtype auto --max-shard-size 4GB
+```
+
+`--source` 可以是 checkpoint 根目录或完成保存的 iteration 目录。`--hf-reference` 提供配置、可选命名索引和 tokenizer 等附属文件，不读取参考模型权重值；目标尺寸和精度以实际源为准。源 args 缺少真实词表大小时，追加 `--vocab-size <未填充的词表大小>`，不能用参考模型大小或 `padded_vocab_size` 猜测。
+
+直接导回本工具刚生成的 checkpoint，可使用其 `hf_export.json`，省略映射和参考目录：
+
+```bash
+python -m tools.checkpoint.hf_mcore_dist.convert mcore-to-hf \
+  --source /outputs/dsv4-preserved \
+  --output /outputs/dsv4-roundtrip
+```
+
+没有 `--hf-reference` 时不复制 tokenizer。若要把 preserve DCP 解码导出为 FP32，在反向命令中追加 `--conversion-mode dense --dtype fp32`。
+
+### 检查与覆盖
+
+在上述转换命令中追加以下选项即可：
+
+| 选项 | 行为 |
+| --- | --- |
+| `--dry-run` | 检查元数据并打印计划，不创建权重输出；零值检查等数值验证留待实际执行 |
+| `--mapping-override /path/override.yaml` | 按规则 id 覆盖、增加或禁用；可重复指定，按顺序应用 |
+| `--overwrite` | 允许替换已有非空输出目录；转换成功后才提交替换 |
+| `--max-shard-size 4GB` | 输出分片的目标大小，不是硬上限；单个大区域可能超过该值 |
+| `--device cpu` | 解码运算设备，默认 CPU；也支持 `cuda[:N]`，不决定训练设备能力 |
+
+输出目录不能与输入目录重叠；`--overwrite` 不会解除这一限制。
 
 旧的 `deepseek-v4` 分派子命令、`convert_deepseek_v4.py` 和专用计划文件入口已经删除，不保留兼容转发。preserve 描述现在记录物理区域位置；缺少这些字段的早期转换产物需重新转换。
 
-量化 payload 的 DCP 序列化/训练加载继续使用现有 `flagscale.train.utils.quantized_checkpoint`、`checkpoint_serialization` 适配器；本次仅修改 `tools/checkpoint`，未修改或收录工作树中这些未追踪文件。通用表的 dense 导入/导出及软件解码不依赖这些适配器，也不导入 Transformers 或构造训练模型。原生 TE 存储仍需对应 TE 环境。
+preserve DCP 的序列化/训练加载依赖环境中的 `flagscale.train.utils.quantized_checkpoint`、`checkpoint_serialization` 适配器；使用前需确保转换和加载环境均具备这些模块。通用表的 dense 导入/导出及软件解码不依赖这些适配器，也不导入 Transformers 或构造训练模型。原生 TE 存储仍需对应 TE 环境。
 
-`--dry-run` 检查元数据并打印计划，不创建输出；`--max-shard-size` 控制文件目标大小；`--overwrite` 在转换成功后替换已有输出。按源矩阵和目标区域写入，专家融合不物化整个专家组。QKV 同一个目标内复用源矩阵，最后一个片段写完即释放；反向逐 HF tensor 组装，HF writer 另有一个输出分片缓冲。这里没有整模型缓存，也不承诺固定内存上限。
+按源矩阵和目标区域写入，专家融合不物化整个专家组。QKV 同一个目标内复用源矩阵，最后一个片段写完即释放；反向逐 HF tensor 组装，HF writer 另有一个输出分片缓冲。这里没有整模型缓存，也不承诺固定内存上限。
 
 导入时在 iteration 目录保存 `hf_export.json`，仅含映射模板、HF config 和去重后的序列化名称模板。直接反向转换不需要参考 HF index 或模型类。训练重存后若未携带该文件，需要重新指定 `--mapping`；无法从 MCore args 恢复的字段由配置覆盖补充。`--hf-reference` 可选，用来提供 HF config 和 tokenizer/附属文件；实际源 MCore 配置的映射字段优先。没有参考目录时，不生成 tokenizer。此入口不会修改训练保存流程来自动传递 sidecar。
 
