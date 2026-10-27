@@ -14,7 +14,7 @@ import io
 import json
 import math
 import os
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,7 +33,7 @@ from torch.distributed.checkpoint.planner import (
 )
 
 from . import MappingError
-from .artifacts import is_extra_state, is_mcore_mtp_key, resolve_iteration_dir
+from .artifacts import is_extra_state, resolve_iteration_dir
 from .fp8_native import NativeFp8Target
 from .hf_io import NativeQuantizedWeight, PreservedQuantizedWeight, parse_size
 from .precision import DENSE_DTYPES, HEADER_DTYPES, TensorSpec
@@ -112,12 +112,43 @@ def _checkpoint_args(model_args, policy):
     return SimpleNamespace(**values)
 
 
+def _piece_tensor(tensor, piece):
+    if piece.hf_index is not None:
+        tensor = tensor[piece.hf_index:piece.hf_index + 1]
+    if piece.source_offset is not None:
+        for axis, (offset, size) in enumerate(zip(piece.source_offset, piece.source_shape)):
+            tensor = tensor.narrow(axis, offset, size)
+    if piece.axes is not None:
+        tensor = tensor.permute(piece.axes)
+    return tensor.reshape(piece.shape)
+
+
 class _LazySaveData:
     def __init__(self, source, lookup, dtypes, groups=None):
         self.source, self.lookup, self.dtypes = source, lookup, dtypes
         self.resolved = set()
         self._group_by_key = {key: list(pieces) for key, pieces in (groups or {}).items()}
         self._qt_cache = {}
+        counts = Counter(p.hf for p in lookup.values())
+        destinations = defaultdict(set)
+        for piece in lookup.values():
+            destinations[piece.hf].add(piece.key)
+        # QKV fragments reuse each source matrix within one global target.
+        # Release on its final fragment; never cache across unrelated targets.
+        self._remaining = {name: count for name, count in counts.items()
+                           if count > 1 and len(destinations[name]) == 1}
+        self._source_cache = {}
+
+    def _source_tensor(self, name):
+        if name not in self._remaining:
+            return self.source.get_tensor(name)
+        if name not in self._source_cache:
+            self._source_cache[name] = self.source.get_tensor(name)
+        tensor = self._source_cache[name]
+        self._remaining[name] -= 1
+        if self._remaining[name] == 0:
+            del self._remaining[name], self._source_cache[name]
+        return tensor
 
     def resolve_data(self, item):
         self.resolved.add(item.index)
@@ -133,10 +164,8 @@ class _LazySaveData:
             return self._native_fp8_piece(piece)
         if self.dtypes[piece.key] is PreservedQuantizedTarget:
             return self._preserved_piece(piece)
-        tensor = self.source.get_tensor(piece.hf)
-        if piece.hf_index is not None:
-            tensor = tensor[piece.hf_index:piece.hf_index + 1]
-        tensor = tensor.reshape(piece.shape).to(device="cpu", dtype=self.dtypes[piece.key])
+        tensor = self._source_tensor(piece.hf)
+        tensor = _piece_tensor(tensor, piece).to(device="cpu", dtype=self.dtypes[piece.key])
         if tensor.is_floating_point() and not bool(torch.isfinite(tensor).all()):
             raise MappingError(f"Non-finite or overflowing tensor: {piece.hf}")
         # Isolate the storage of mHC slices and dequantized views for torch.save.
@@ -147,9 +176,8 @@ class _LazySaveData:
 
         spec = self.source.specs[piece.hf]
         if spec.kind == "dense":
-            tensor = self.source.get_tensor(piece.hf)
-            if piece.hf_index is not None:
-                tensor = tensor[piece.hf_index:piece.hf_index + 1]
+            tensor = self._source_tensor(piece.hf)
+            tensor = _piece_tensor(tensor, piece)
             if not bool(torch.isfinite(tensor).all()):
                 raise MappingError(f"Non-finite dense source: {piece.hf}")
             return tensor.reshape(piece.shape).contiguous().clone()
@@ -296,6 +324,9 @@ def save_streaming_checkpoint(source, profile, policy, config, output_root, *, m
         # register the same allowlist — see fp8_native.register_native_fp8_safe_globals).
         from .fp8_native import register_native_fp8_safe_globals
         register_native_fp8_safe_globals()
+    preserved_names = [piece.hf for piece in profile.pieces if dtypes[piece.key] is PreservedQuantizedTarget]
+    if len(preserved_names) != len(set(preserved_names)):
+        raise MappingError("Preserved tensors must map to one whole storage region each; use dense mode")
     storage_metadata, items, lookup, physical_sizes = {}, [], {}, {}
     for key, pieces in groups.items():
         # Logical dtype describes the read view, not physical byte storage.
@@ -323,7 +354,7 @@ def save_streaming_checkpoint(source, profile, policy, config, output_root, *, m
                 rows, cols = piece.shape[-2:]
                 physical_sizes[index] = math.prod(piece.shape) + math.ceil(rows / 128) * math.ceil(cols / 128) * 4
         storage_metadata[key] = TensorStorageMetadata(properties, torch.Size(pieces[0].global_shape), chunks)
-    extra_keys = sorted({p.extra_key for p in profile.pieces if p.extra_key})
+    extra_keys = sorted({p.extra_key for p in profile.pieces if p.extra_key} | set(profile.extra_keys))
     for key in extra_keys:
         storage_metadata[key] = BytesStorageMetadata()
         items.append(WriteItem(MetadataIndex(key), WriteItemType.BYTE_IO))
@@ -356,7 +387,8 @@ def save_streaming_checkpoint(source, profile, policy, config, output_root, *, m
     # finalized. No repeated save() calls overwrite the same checkpoint.
     writer.finish(Metadata(storage_metadata), [results])
     preserved = {
-        piece.hf: {"spec": asdict(source.specs[piece.hf]), "key": piece.key}
+        piece.hf: {"spec": asdict(source.specs[piece.hf]), "key": piece.key,
+                   "offset": list(piece.offset), "shape": list(piece.shape)}
         for piece in profile.pieces if dtypes[piece.key] is PreservedQuantizedTarget
     }
     preserved_metadata = {
@@ -405,18 +437,16 @@ class _ReadDestination:
 
 
 class StreamingCheckpointReader:
-    def __init__(self, checkpoint_path, profile, *, skip_mtp=False, shape_matches=None, ignore=()):
+    def __init__(self, checkpoint_path, profile, *, shape_matches=None, ignore=()):
         require_world_one()
         self.directory = resolve_iteration_dir(checkpoint_path)
         self.reader = FileSystemReader(self.directory)
         self.metadata = self.reader.read_metadata()
         self.reader.set_up_storage_reader(self.metadata, is_coordinator=True)
         self.profile, self.used = profile, set()
-        self.skip_mtp = skip_mtp
-        self.shape_matches = shape_matches or (lambda key, actual, expected: actual == expected)
+        self.shape_matches = shape_matches or (
+            lambda key, actual, expected: actual == profile.physical_shapes.get(key, expected))
         self.ignore = set(ignore)
-        if skip_mtp and any(is_mcore_mtp_key(key) for key in profile.keys):
-            raise MappingError("A plan that drops MTP must contain no MTP target regions")
         self.by_hf = defaultdict(list)
         self.groups = _groups(profile)
         for piece in profile.pieces:
@@ -430,16 +460,40 @@ class StreamingCheckpointReader:
             self.preserved_config = preserved.get("source_precision_config", {})
             if not isinstance(self.preserved_config, dict):
                 raise MappingError("Preserved source precision config must be a mapping")
-            for name, item in preserved["tensor_specs"].items():
-                if skip_mtp and name not in self.by_hf and name.startswith("mtp."):
+            locations = {}
+            for item in preserved["tensor_specs"].values():
+                if "offset" not in item or "shape" not in item:
+                    raise MappingError("Preserved storage lacks region metadata; regenerate the converted checkpoint")
+                location = (item["key"], tuple(item["offset"]), tuple(item["shape"]))
+                if location in locations:
+                    raise MappingError("Duplicate preserved storage region")
+                locations[location] = item
+            used_locations = set()
+            for name, pieces in self.by_hf.items():
+                matches = [(p.key, p.offset, p.shape) for p in pieces
+                           if (p.key, p.offset, p.shape) in locations]
+                if not matches:
                     continue
-                if name not in self.by_hf or any(p.key != item["key"] for p in self.by_hf[name]):
-                    raise MappingError(f"Preserved storage schema differs from mapping: {name}")
-                spec = TensorSpec(**{**item["spec"], "shape": tuple(item["spec"]["shape"])})
-                if spec.shape != tuple(profile.shapes[name]):
-                    raise MappingError(f"Preserved source shape mismatch: {name}")
+                if len(pieces) != 1:
+                    raise MappingError(f"Cannot reassemble preserved encoding from fragments: {name}")
+                item = locations[matches[0]]
+                source_spec = item["spec"]
+                # Names are mapping declarations; storage dtype/encoding follow
+                # the requested physical region even if the user swaps two weights.
+                scale = source_spec.get("scale")
+                if scale:
+                    suffix = ".weight_scale_inv" if scale.endswith(".weight_scale_inv") else ".scale"
+                    scale = name.removesuffix(".weight") + suffix
+                spec = TensorSpec(**{**source_spec, "name": name, "scale": scale,
+                                     "shape": tuple(source_spec["shape"])})
+                if spec.shape != tuple(profile.shapes[name]) or pieces[0].axes is not None:
+                    raise MappingError(f"Cannot reshape/permute preserved encoding: {name}; export dense first")
                 self.preserved_specs[name] = spec
                 self.preserved_keys.add(item["key"])
+                used_locations.add(matches[0])
+            unmapped = {loc for loc in locations if loc[0] not in self.ignore} - used_locations
+            if unmapped:
+                raise MappingError("Preserved regions do not match the declared layout; export dense first")
         self._validate_metadata()
         self.tensor_dtypes()  # Reject implicit promotion when joining MCore pieces.
         self.native_keys, self.native_hf_names = self._detect_native_keys()
@@ -504,8 +558,6 @@ class StreamingCheckpointReader:
 
         unknown = []
         for key, entry in self.metadata.state_dict_metadata.items():
-            if self.skip_mtp and is_mcore_mtp_key(key):
-                continue
             if key not in self.groups:
                 if key in self.ignore:
                     continue
@@ -680,31 +732,36 @@ class StreamingCheckpointReader:
         )
 
     def tensors(self):
+        dtypes = self.tensor_dtypes()
         for name, pieces in self.by_hf.items():
-            if len(pieces) == 1:
-                tensor = self._read_piece(pieces[0])
-                if not isinstance(tensor, (NativeQuantizedWeight, PreservedQuantizedWeight)):
-                    tensor = tensor.reshape(self.profile.shapes[name])
-                else:
-                    if tuple(tensor.shape) != tuple(self.profile.shapes[name]):
-                        raise MappingError(
-                            f"Native quantized piece shape mismatch: {name}: "
-                            f"{tuple(tensor.shape)} != {tuple(self.profile.shapes[name])}")
+            first = self._read_piece(pieces[0])
+            if isinstance(first, (NativeQuantizedWeight, PreservedQuantizedWeight)):
+                if len(pieces) != 1 or tuple(first.shape) != tuple(self.profile.shapes[name]):
+                    raise MappingError(f"Quantized output cannot assemble partial/reordered payloads: {name}")
+                tensor = first
             else:
-                pieces = sorted(pieces, key=lambda p: p.hf_index)
-                results = [self._read_piece(piece) for piece in pieces]
-                if all(isinstance(result, NativeQuantizedWeight) for result in results):
-                    data = torch.cat([result.data for result in results], dim=0).contiguous()
-                    scale_inv = torch.cat([result.scale_inv for result in results], dim=0).contiguous()
-                    tensor = NativeQuantizedWeight("fp8", data, scale_inv)
-                elif any(isinstance(result, NativeQuantizedWeight) for result in results):
-                    raise MappingError(f"Mixed dense/quantized pieces for {name}")
-                else:
-                    tensor = torch.cat([result.reshape(-1) for result in results])
-                    tensor = tensor.reshape(self.profile.shapes[name])
+                shape = self.profile.shapes[name]
+                tensor = torch.empty(shape, dtype=dtypes[name], device="cpu")
+                for index, piece in enumerate(pieces):
+                    value = first if index == 0 else self._read_piece(piece)
+                    if not isinstance(value, torch.Tensor):
+                        raise MappingError(f"Mixed raw/dense fragments for {name}")
+                    fragment = piece.source_shape or shape
+                    if piece.axes is not None:
+                        value = value.reshape([fragment[i] for i in piece.axes])
+                        value = value.permute([piece.axes.index(i) for i in range(len(piece.axes))])
+                    else:
+                        value = value.reshape(fragment)
+                    target = tensor
+                    offset = piece.source_offset or (0,) * len(shape)
+                    if piece.hf_index is not None:
+                        offset, fragment = (piece.hf_index,), (1,)
+                    for axis, (start, size) in enumerate(zip(offset, fragment)):
+                        target = target.narrow(axis, start, size)
+                    target.copy_(value)
             self.used.add(name)
             yield name, tensor
-            del tensor
+            del tensor, first
         if self.used != set(self.profile.shapes):
             raise MappingError("Incomplete HF export coverage")
 

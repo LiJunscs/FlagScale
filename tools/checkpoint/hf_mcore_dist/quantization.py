@@ -310,7 +310,8 @@ def output_config(config: Mapping[str, Any], policy: PrecisionPolicy, *, archive
     # Reference-only precision declarations must never survive a dense export.
     for field in ("quantization_config", "scale_fmt", "scale_dtype"):
         result.pop(field, None)
-    result["expert_dtype"] = policy.expert_dtype or policy.dtype
+    if "expert_dtype" in config or policy.expert_dtype is not None:
+        result["expert_dtype"] = policy.expert_dtype or policy.dtype
     if policy.native_export:
         quant = config.get("quantization_config")
         if (not isinstance(quant, Mapping) or not quant) and (
@@ -319,12 +320,16 @@ def output_config(config: Mapping[str, Any], policy: PrecisionPolicy, *, archive
                 "Native quantized export requires a quantization_config in the mapping-plan target config")
         if quant:
             result["quantization_config"] = copy.deepcopy(dict(quant))
-            result["quantization_config"]["modules_to_not_convert"] = list(policy.unquantized_modules)
+            if policy.storage_mode != "preserve":
+                result["quantization_config"]["modules_to_not_convert"] = list(policy.unquantized_modules)
         if policy.storage_mode == "preserve":
             for field in ("scale_fmt", "scale_dtype"):
                 if field in config:
                     result[field] = copy.deepcopy(config[field])
-        result["expert_dtype"] = policy.expert_dtype or "fp8"
+        if policy.storage_mode == "preserve" and "expert_dtype" in config:
+            result["expert_dtype"] = config["expert_dtype"]
+        elif policy.expert_dtype is not None:
+            result["expert_dtype"] = policy.expert_dtype
         return result
     if policy.preserve_quantization:
         if archive is None:
@@ -441,3 +446,19 @@ def encode_hf_tensors(tensors, source, policy: PrecisionPolicy, config: Mapping[
 def _output_quantization_layout(specs):
     return tuple(sorted(spec.name.removesuffix(".weight") for spec in specs.values()
                         if spec.kind == "dense" and spec.name.endswith(".weight"))), None
+
+
+def decode_stored_tensor(tensor, dtype):
+    """Explicit dense export of a preserved storage object using the common codec."""
+    if isinstance(tensor, PreservedQuantizedWeight):
+        scale = tensor.scale
+        if tensor.scale_dtype in {*E8M0_DTYPES, "U8"}:
+            if bool((scale == 255).any()):
+                raise PrecisionError("Invalid E8M0 NaN scale")
+            scale = torch.exp2(scale.float() - 127)
+        if not bool(torch.isfinite(scale).all()) or bool((scale <= 0).any()):
+            raise PrecisionError("Quantization scales must be finite and positive")
+        return decode_quantized_matrix(tensor.data, scale.float(), tensor.kind, tensor.shape, dtype)
+    if isinstance(tensor, NativeQuantizedWeight):
+        return decode_quantized_matrix(tensor.data, tensor.scale_inv.float(), "fp8", tensor.shape, dtype)
+    return tensor

@@ -64,7 +64,7 @@ def load_mapping(location, overrides=(), *, _parents=(), _base=None):
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:
         raise MappingError("Mapping must be a schema_version: 1 object")
     allowed = {"schema_version", "extends", "profile", "rules", "config_map", "hf_config",
-               "mcore_args", "ignore", "quantization"}
+               "mcore_args", "ignore", "quantization", "naming", "adapter", "scopes", "zero_checks"}
     if payload.keys() - allowed:
         raise MappingError(f"Unknown mapping fields: {sorted(payload.keys() - allowed)}")
     result = deepcopy(_base) if _base is not None else {"schema_version": 1, "rules": []}
@@ -77,13 +77,14 @@ def load_mapping(location, overrides=(), *, _parents=(), _base=None):
         parent_mapping = load_mapping(parent, _parents=(*_parents, identity))
         result = overlay(result, parent_mapping)
     result["rules"] = merge_rules(result["rules"], payload.get("rules", []))
-    for key in ("config_map", "hf_config", "mcore_args", "ignore", "quantization"):
+    for key in ("config_map", "hf_config", "mcore_args", "ignore", "quantization", "naming", "scopes", "zero_checks"):
         value = payload.get(key, {})
         if not isinstance(value, dict):
             raise MappingError(f"{key} must be an object")
         result[key] = {**result.get(key, {}), **deepcopy(value)}
-    if "profile" in payload:
-        result["profile"] = payload["profile"]
+    for key in ("profile", "adapter"):
+        if key in payload:
+            result[key] = payload[key]
     for override in overrides:
         result = load_mapping(override, _base=result)
     return result
@@ -92,10 +93,11 @@ def load_mapping(location, overrides=(), *, _parents=(), _base=None):
 def overlay(base, patch):
     result = deepcopy(base)
     result["rules"] = merge_rules(base["rules"], patch["rules"])
-    for key in ("config_map", "hf_config", "mcore_args", "ignore", "quantization"):
+    for key in ("config_map", "hf_config", "mcore_args", "ignore", "quantization", "naming", "scopes", "zero_checks"):
         result[key] = {**base.get(key, {}), **patch.get(key, {})}
-    if "profile" in patch:
-        result["profile"] = patch["profile"]
+    for key in ("profile", "adapter"):
+        if key in patch:
+            result[key] = patch[key]
     return result
 
 
@@ -114,10 +116,28 @@ def _pattern(template):
 def expand_rules(mapping, keys, configs, forward):
     """Enumerate layer ids from actual keys; only collected axes need a count."""
     source_side = "hf" if forward else "mcore"
-    for raw in mapping["rules"]:
-        allowed = {"id", "hf", "mcore", "op", "params", "collect", "optional", "extra_state"}
+    rows = []
+    for rule in mapping["rules"]:
+        if rule.get("scope") is not None and rule["scope"] not in mapping.get("scopes", {}):
+            raise MappingError(f"Unknown scope: {rule['scope']}")
+        scopes = mapping.get("scopes", {}).get(rule.get("scope"), [None])
+        for scope in scopes:
+            row = {k: v for k, v in rule.items() if k != "scope"}
+            if scope is not None:
+                for side in ("hf", "mcore"):
+                    row[side] = [scope[side] + t for t in row[side]]
+                row["id"] = rule["id"] + ":" + scope["hf"]
+                row["extra_state"] = [scope["mcore"] + t for t in row.get("extra_state", [])]
+                row["optional"] = row.get("optional", False) or scope.get("optional", False)
+            rows.append(row)
+    for raw in rows:
+        allowed = {"id", "hf", "mcore", "op", "params", "collect", "optional", "extra_state", "export_slice", "generate"}
         if raw.keys() - allowed:
             raise MappingError(f"Unknown fields in rule {raw['id']}: {sorted(raw.keys() - allowed)}")
+        if raw.get("generate"):
+            row = {**raw, "params": {}, "generate": resolve(raw["generate"], configs)}
+            yield row
+            continue
         for side in ("hf", "mcore"):
             if (not isinstance(raw.get(side), list) or not raw[side]
                     or any(not isinstance(x, str) or not x for x in raw[side])):
@@ -153,5 +173,12 @@ def expand_rules(mapping, keys, configs, forward):
                     raise MappingError(f"Duplicate expanded names: {raw['id']}")
                 row[side] = names
             if "extra_state" in row:
-                row["extra_state"] = [t.format(**dict(ctx)) for t in row["extra_state"]]
+                axes = {k: n for k, n in collect.items()
+                        if any(k in _pattern(t)[1] for t in row["extra_state"])}
+                row["extra_state"] = [t.format(**{**dict(ctx), **dict(zip(axes, values)),
+                                                    **{k + "_count": v for k, v in collect.items()}})
+                                      for values in itertools.product(*(range(n) for n in axes.values()))
+                                      for t in row["extra_state"]]
+            if "export_slice" in row:
+                row["export_slice"] = resolve(row["export_slice"], configs)
             yield row
