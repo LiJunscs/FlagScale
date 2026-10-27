@@ -27,6 +27,11 @@ from __future__ import annotations
 
 import torch
 
+from flagscale.train.utils.checkpoint_serialization import (
+    native_fp8_types,
+    register_native_fp8_safe_globals as _register_native_fp8_safe_globals,
+)
+
 from .precision import PrecisionError
 
 FP8_BLOCK = 128
@@ -51,13 +56,9 @@ class NativeFp8Target:
 
 def _te_qt_types():
     try:
-        from transformer_engine.pytorch.cpp_extensions import DType as te_dtype
-        from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
-            Float8BlockQuantizer, Float8BlockwiseQTensor,
-        )
+        return native_fp8_types()
     except ImportError as error:  # pragma: no cover - env dependent
         raise NativeFp8Error(f"{TE_IMPORT_ERROR}: {error}") from error
-    return te_dtype, Float8BlockwiseQTensor, Float8BlockQuantizer
 
 
 def require_native_fp8_capable() -> None:
@@ -65,24 +66,15 @@ def require_native_fp8_capable() -> None:
 
 
 def register_native_fp8_safe_globals() -> None:
-    """Allowlist the qt pickle globals for torch>=2.6 ``weights_only=True``.
+    """Compatibility entrypoint for the shared FlagScale serialization helper.
 
-    torch's DCP reader hard-codes ``torch.load(..., weights_only=True)``
-    (torch/distributed/checkpoint/filesystem.py), and stock megatron-core's
-    SAFE_GLOBALS covers only mcore/numpy classes — a checkpoint written by this
-    converter cannot be loaded back until the TE qt globals are allowlisted.
-    The five required entries were verified live against torch 2.9 + TE-FL:
-    ``getattr`` (quantizer enum lookup) plus the qt/quantizer/dtype objects and
-    the bound ``_make_in_reduce_ex`` reduce callable (rejected as an
-    "unrecognized function" unless registered explicitly). Call this in the
-    training entrypoint BEFORE any distributed checkpoint load.
+    FlagScale training registers automatically from source checkpoint metadata.
+    Standalone DCP consumers can call this before loading native tensor blobs.
     """
-    import builtins
-
-    torch.serialization.add_safe_globals([builtins.getattr])
-    te_dtype, qt_cls, quantizer_cls = _te_qt_types()
-    torch.serialization.add_safe_globals(
-        [qt_cls, quantizer_cls, te_dtype, qt_cls._make_in_reduce_ex])
+    try:
+        _register_native_fp8_safe_globals()
+    except ImportError as error:  # pragma: no cover - env dependent
+        raise NativeFp8Error(f"{TE_IMPORT_ERROR}: {error}") from error
 
 
 def build_native_qt(data: torch.Tensor, scale_inv: torch.Tensor,

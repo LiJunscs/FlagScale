@@ -129,13 +129,23 @@ def _prepare_conversion(args, plan, to_mcore):
         # Always bind native specs when the checkpoint stores quantized payloads,
         # even without --export-native-quantization: the flag-off path must hit
         # the explicit policy error, not a raw unpickling failure.
-        native = {name: hf_storage.specs[name] for name in reader.native_hf_names}
-        source = with_storage_dtypes(source, dtypes, native=native)
+        native = {name: hf_storage.specs[name] for name in reader.native_hf_names
+                  if name not in reader.preserved_specs}
+        source = with_storage_dtypes(source, dtypes, native=native,
+                                     preserved=reader.preserved_specs)
+        if reader.preserved_specs:
+            config = dict(config)
+            for field in ("quantization_config", "scale_fmt", "scale_dtype", "expert_dtype"):
+                config.pop(field, None)
+            config.update(reader.preserved_config)
     archive = (QuantizedArchive(reader.directory, source)
                if getattr(args, "restore_original_quantization", False) else None)
+    storage_mode = (getattr(args, "conversion_mode", "dense") if to_mcore else
+                    "preserve" if reader.preserved_specs else None)
     policy = resolve_precision(source, config, args.dtype, args.device, to_mcore=to_mcore,
                                archive=archive,
-                               native_export=getattr(args, "export_native_quantization", False))
+                               native_export=getattr(args, "export_native_quantization", False),
+                               storage_mode=storage_mode)
     for message in policy.warnings:
         warnings.warn(message, UserWarning, stacklevel=2)
     if to_mcore:
@@ -214,10 +224,9 @@ def _add_common(parser, *, mcore_path_required=True):
     group.add_argument("--mapping-override", help="Fixed DSv4 weight-rule overrides in YAML/JSON")
     parser.add_argument("--hf-headers", action="store_true",
                         help="Also record existing HF headers; reference precision never controls export")
-    parser.add_argument("--dtype", choices=("auto", "bf16", "fp16", "fp32", "fp8"), default="auto",
+    parser.add_argument("--dtype", choices=("auto", "bf16", "fp16", "fp32"), default="auto",
                         help="auto: preserve source tensor dtypes; explicit values override dense "
-                             "non-FP32 tensors; fp8 (hf-to-mcore only): store quantized weights as "
-                             "native TE Float8BlockwiseQTensor payloads for native-FP8 training")
+                             "non-FP32 tensors; preserve mode requires auto")
     parser.add_argument("--device", default="auto", help="Device for decoding arithmetic, not a storage capability filter")
     parser.add_argument("--vocab-size", type=int, default=None,
                         help="mcore-to-hf only: source model's unpadded vocab_size. Required when the "
@@ -232,6 +241,9 @@ def build_parser():
     sub = parser.add_subparsers(dest="command", required=True)
     forward = sub.add_parser("hf-to-mcore", allow_abbrev=False)
     _add_common(forward)
+    forward.add_argument("--conversion-mode", choices=("preserve", "dense"), default="dense",
+                         help="preserve: keep original quantized payloads/scales in DCP with the "
+                              "FlagScale load adapter; dense (default): decode to ordinary DCP tensors")
     forward.add_argument("--max-shard-size", default="4GB",
                          help="DCP file payload target (default: 4GB); an oversized chunk gets its own file")
     reverse = sub.add_parser("mcore-to-hf", allow_abbrev=False)

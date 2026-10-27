@@ -16,6 +16,7 @@ import math
 import os
 import re
 from collections import defaultdict
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -35,9 +36,13 @@ from torch.distributed.checkpoint.planner import (
 from . import MappingError
 from .artifacts import is_extra_state, is_mcore_mtp_key, mcore_shape_matches, resolve_iteration_dir
 from .fp8_native import NativeFp8Target
-from .hf_io import NativeQuantizedWeight, parse_size
-from .precision import DENSE_DTYPES, HEADER_DTYPES, canonical_hf_name
+from .hf_io import NativeQuantizedWeight, PreservedQuantizedWeight, parse_size
+from .precision import DENSE_DTYPES, HEADER_DTYPES, TensorSpec, canonical_hf_name
 from .world_one import require_world_one
+
+
+class PreservedQuantizedTarget:
+    """Storage marker: keep source payloads, decode only at DCP load time."""
 
 
 def validate_regions(key, shape, regions):
@@ -85,6 +90,9 @@ def _storage_dtype(pieces, source, policy):
     if policy.native_fp8 and all(source.specs[p.hf].kind in ("fp8", "mxfp4") for p in pieces):
         from .fp8_native import NativeFp8Target
         return NativeFp8Target
+    if policy.preserve_storage and (len(types) > 1 or any(
+            source.specs[p.hf].kind != "dense" for p in pieces)):
+        return PreservedQuantizedTarget
     dtypes = {HEADER_DTYPES[code] if code in HEADER_DTYPES and policy.preserve_source_dtypes
               else torch.float32 if code == "F32" else DENSE_DTYPES[policy.dtype]
               for code in types}
@@ -128,6 +136,8 @@ class _LazySaveData:
         piece = self.lookup[item.index]
         if self.dtypes[piece.key] is NativeFp8Target:
             return self._native_fp8_piece(piece)
+        if self.dtypes[piece.key] is PreservedQuantizedTarget:
+            return self._preserved_piece(piece)
         tensor = self.source.get_tensor(piece.hf)
         if piece.hf_index is not None:
             tensor = tensor[piece.hf_index:piece.hf_index + 1]
@@ -136,6 +146,32 @@ class _LazySaveData:
             raise MappingError(f"Non-finite or overflowing tensor: {piece.hf}")
         # Isolate the storage of mHC slices and dequantized views for torch.save.
         return tensor.contiguous().clone()
+
+    def _preserved_piece(self, piece):
+        from flagscale.train.utils.quantized_checkpoint import PreservedQuantizedTensor
+
+        spec = self.source.specs[piece.hf]
+        if spec.kind == "dense":
+            tensor = self.source.get_tensor(piece.hf)
+            if piece.hf_index is not None:
+                tensor = tensor[piece.hf_index:piece.hf_index + 1]
+            if not bool(torch.isfinite(tensor).all()):
+                raise MappingError(f"Non-finite dense source: {piece.hf}")
+            return tensor.reshape(piece.shape).contiguous().clone()
+        if piece.hf_index is not None:
+            raise MappingError(f"Quantized sources cannot be split as scalars: {piece.hf}")
+        data = self.source.reader.get_bytes(spec.name).clone()
+        # Check scale values, but store their original representation unchanged.
+        self.source._scale(spec)
+        if spec.kind == "fp8" and bool(((data & 127) == 127).any()):
+            raise MappingError(f"NaN FP8 source payload: {piece.hf}")
+        scale = (self.source.reader.get_bytes(spec.scale) if spec.scale_dtype in
+                 {"U8", "F8_E8M0", "F8_E8M0FNU"} else
+                 self.source.reader.get_tensor(spec.scale)).clone()
+        self.source.consumed.update((spec.name, spec.scale))
+        return PreservedQuantizedTensor(
+            piece.shape, torch.float32, spec.kind, data, scale, spec.dtype, spec.scale_dtype,
+        )
 
     def _native_fp8_piece(self, piece):
         """Materialize one chunk as a TE Float8BlockwiseQTensor.
@@ -184,7 +220,7 @@ class _LazySaveData:
         return payload
 
 
-def _file_plans(items, max_shard_size):
+def _file_plans(items, max_shard_size, *, physical_sizes=None):
     """Pack physical chunks, not global tensor sizes, without loading weights."""
     plans, bucket, size = [], [], 0
     for item in items:
@@ -193,11 +229,8 @@ def _file_plans(items, max_shard_size):
             item_size = 4096
         else:
             data = item.tensor_data
-            if data.properties.dtype is NativeFp8Target:
-                # 1 byte of fp8 payload + ~1/4096 of scale factors per element.
-                item_size = math.prod(data.chunk.sizes)
-            else:
-                item_size = math.prod(data.chunk.sizes) * data.properties.dtype.itemsize
+            item_size = (physical_sizes or {}).get(
+                item.index, math.prod(data.chunk.sizes) * data.properties.dtype.itemsize)
         if bucket and size + item_size > max_shard_size:
             plans.append(SavePlan(bucket))
             bucket, size = [], 0
@@ -273,12 +306,14 @@ def save_streaming_checkpoint(source, profile, policy, config, output_root, *, m
         # register the same allowlist — see fp8_native.register_native_fp8_safe_globals).
         from .fp8_native import register_native_fp8_safe_globals
         register_native_fp8_safe_globals()
-    storage_metadata, items, lookup = {}, [], {}
+    storage_metadata, items, lookup, physical_sizes = {}, [], {}, {}
     for key, pieces in groups.items():
-        # Native FP8 chunks are stored as TE Float8BlockwiseQTensor objects; the
-        # DCP metadata records their fake (dequantized) dtype, as mcore expects.
+        # Logical dtype describes the read view, not physical byte storage.
+        # Preserve chunks decode in FP32 before DCP copies into target params.
+        # Legacy TE objects retain their BF16 fake dtype contract.
         properties = TensorProperties(
-            dtype=torch.bfloat16 if dtypes[key] is NativeFp8Target else dtypes[key])
+            dtype=(torch.float32 if dtypes[key] is PreservedQuantizedTarget else
+                   DENSE_DTYPES[policy.dtype] if dtypes[key] is NativeFp8Target else dtypes[key]))
         chunks = []
         for i, piece in enumerate(pieces):
             chunk = ChunkStorageMetadata(torch.Size(piece.offset), torch.Size(piece.shape))
@@ -287,6 +322,16 @@ def save_streaming_checkpoint(source, profile, policy, config, output_root, *, m
             items.append(WriteItem(index, WriteItemType.SHARD,
                                    tensor_data=TensorWriteData(chunk, properties, torch.Size(piece.global_shape))))
             lookup[index] = piece
+            if dtypes[key] is PreservedQuantizedTarget:
+                spec = source.specs[piece.hf]
+                if spec.kind == "dense":
+                    physical_sizes[index] = math.prod(piece.shape) * HEADER_DTYPES[spec.dtype].itemsize
+                else:
+                    physical_sizes[index] = sum(source.reader.tensor_storage(name)[2]
+                                                for name in (spec.name, spec.scale))
+            elif dtypes[key] is NativeFp8Target:
+                rows, cols = piece.shape[-2:]
+                physical_sizes[index] = math.prod(piece.shape) + math.ceil(rows / 128) * math.ceil(cols / 128) * 4
         storage_metadata[key] = TensorStorageMetadata(properties, torch.Size(pieces[0].global_shape), chunks)
     extra_keys = sorted({p.extra_key for p in profile.pieces if p.extra_key})
     for key in extra_keys:
@@ -297,7 +342,8 @@ def save_streaming_checkpoint(source, profile, policy, config, output_root, *, m
     writer = FileSystemWriter(directory, single_file_per_rank=True, thread_count=1,
                               per_thread_copy_ahead=0, sync_files=True, overwrite=False)
     writer.set_up_storage_writer(is_coordinator=True)
-    plans = [writer.prepare_local_plan(plan) for plan in _file_plans(items, max_shard_size)]
+    plans = [writer.prepare_local_plan(plan) for plan in
+             _file_plans(items, max_shard_size, physical_sizes=physical_sizes)]
     # Allocate every file prefix in one call. These are storage buckets, not
     # distributed ranks; separately planning each bucket would reuse __0_0.distcp.
     plans = writer.prepare_global_plan(plans)
@@ -319,6 +365,16 @@ def save_streaming_checkpoint(source, profile, policy, config, output_root, *, m
     # Only after all tensor/scale and region checks pass is the global metadata
     # finalized. No repeated save() calls overwrite the same checkpoint.
     writer.finish(Metadata(storage_metadata), [results])
+    preserved = {
+        piece.hf: {"spec": asdict(source.specs[piece.hf]), "key": piece.key}
+        for piece in profile.pieces if dtypes[piece.key] is PreservedQuantizedTarget
+    }
+    preserved_metadata = {
+        "schema_version": 1, "tensor_specs": preserved,
+        "source_precision_config": {name: config[name] for name in
+                                    ("quantization_config", "scale_fmt", "scale_dtype", "expert_dtype")
+                                    if name in config},
+    }
     common = {
         "args": saved_args,
         "checkpoint_version": 3.0, "iteration": 0,
@@ -328,6 +384,10 @@ def save_streaming_checkpoint(source, profile, policy, config, output_root, *, m
                              "deepseek_v4_hf_config": dict(config),
                              "profile_revision": "dsv4-global-v1"},
     }
+    if preserved:
+        common["content_metadata"]["preserved_quantization"] = preserved_metadata
+        (directory / "preserved_quantization.json").write_text(
+            json.dumps(preserved_metadata, indent=2) + "\n", encoding="utf-8")
     torch.save(common, directory / "common.pt")
     marker = {"sharded_backend": "torch_dist", "sharded_backend_version": 1,
               "common_backend": "torch", "common_backend_version": 1}
@@ -391,6 +451,25 @@ class StreamingCheckpointReader:
         self.groups = _groups(profile)
         for piece in profile.pieces:
             self.by_hf[piece.hf].append(piece)
+        descriptor = self.directory / "preserved_quantization.json"
+        self.preserved_specs, self.preserved_keys, self.preserved_config = {}, set(), {}
+        if descriptor.is_file():
+            preserved = json.loads(descriptor.read_text(encoding="utf-8"))
+            if preserved.get("schema_version") != 1 or not isinstance(preserved.get("tensor_specs"), dict):
+                raise MappingError("Unsupported preserved quantized DCP schema")
+            self.preserved_config = preserved.get("source_precision_config", {})
+            if not isinstance(self.preserved_config, dict):
+                raise MappingError("Preserved source precision config must be a mapping")
+            for name, item in preserved["tensor_specs"].items():
+                if skip_mtp and name not in self.by_hf and name.startswith("mtp."):
+                    continue
+                if name not in self.by_hf or any(p.key != item["key"] for p in self.by_hf[name]):
+                    raise MappingError(f"Preserved storage schema differs from mapping: {name}")
+                spec = TensorSpec(**{**item["spec"], "shape": tuple(item["spec"]["shape"])})
+                if spec.shape != tuple(profile.shapes[name]):
+                    raise MappingError(f"Preserved source shape mismatch: {name}")
+                self.preserved_specs[name] = spec
+                self.preserved_keys.add(item["key"])
         self._validate_metadata()
         self.tensor_dtypes()  # Reject implicit promotion when joining MCore pieces.
         self.native_keys, self.native_hf_names = self._detect_native_keys()
@@ -403,8 +482,10 @@ class StreamingCheckpointReader:
         loader would either fail weights_only unpickling or silently
         dequantize. They are read directly as raw payload/scale pairs instead.
         """
-        native_keys = set()
+        native_keys = set(self.preserved_keys)
         for key in sorted(self.groups):
+            if key in self.preserved_keys:
+                continue
             entry = self.metadata.state_dict_metadata[key]
             if not isinstance(entry, TensorStorageMetadata) or not entry.chunks:
                 continue
@@ -422,11 +503,16 @@ class StreamingCheckpointReader:
                 raise MappingError(
                     f"Native quantized DCP storage must declare bf16 metadata dtype: {key}: {entry.properties.dtype}")
             native_keys.add(key)
-        return native_keys, {piece.hf for piece in self.profile.pieces if piece.key in native_keys}
+        return native_keys, {piece.hf for piece in self.profile.pieces if piece.key in native_keys
+                             and (piece.hf not in self.preserved_specs or
+                                  self.preserved_specs[piece.hf].kind != "dense")}
 
     def tensor_dtypes(self):
         dtypes = {}
         for name, pieces in self.by_hf.items():
+            if name in self.preserved_specs and self.preserved_specs[name].kind == "dense":
+                dtypes[name] = HEADER_DTYPES[self.preserved_specs[name].dtype]
+                continue
             types = {self.metadata.state_dict_metadata[piece.key].properties.dtype for piece in pieces}
             if len(types) != 1:
                 raise MappingError(f"Inconsistent source DCP dtypes for {name}: {sorted(map(str, types))}")
@@ -565,6 +651,8 @@ class StreamingCheckpointReader:
         return NativeQuantizedWeight("fp8", data, scale_inv)
 
     def _read_piece(self, piece):
+        if piece.hf in self.preserved_specs:
+            return self._read_preserved_piece(piece)
         if piece.key in self.native_keys:
             return self._read_native_piece(piece)
         entry = self.metadata.state_dict_metadata[piece.key]
@@ -592,11 +680,41 @@ class StreamingCheckpointReader:
         self.reader.read_data(plan, _ReadDestination(tensor)).wait()
         return tensor
 
+    def _read_preserved_piece(self, piece):
+        from flagscale.train.utils.quantized_checkpoint import (
+            PreservedQuantizedTensor, register_preserved_quantization_safe_globals,
+        )
+
+        spec = self.preserved_specs[piece.hf]
+        entry = self.metadata.state_dict_metadata[piece.key]
+        matches = [(i, chunk) for i, chunk in enumerate(entry.chunks)
+                   if tuple(chunk.offsets) == piece.offset and tuple(chunk.sizes) == piece.shape]
+        if len(matches) != 1:
+            raise MappingError(f"Original quantized chunks were changed or resharded: {piece.hf}")
+        i, chunk = matches[0]
+        info = self.metadata.storage_data[MetadataIndex(piece.key, chunk.offsets, i)]
+        with (self.directory / info.relative_path).open("rb") as stream:
+            stream.seek(info.offset)
+            payload = stream.read(info.length)
+        register_preserved_quantization_safe_globals()
+        obj = torch.load(io.BytesIO(payload), weights_only=True, map_location="cpu")
+        if spec.kind == "dense":
+            if isinstance(obj, PreservedQuantizedTensor) or obj.dtype != HEADER_DTYPES[spec.dtype]:
+                raise MappingError(f"Preserved dense dtype mismatch: {piece.hf}")
+            return obj.reshape(piece.shape)
+        if not isinstance(obj, PreservedQuantizedTensor) or tuple(obj.shape) != piece.shape:
+            raise MappingError(f"Unexpected preserved chunk: {piece.hf}")
+        if (obj.kind, obj.data_dtype, obj.scale_dtype) != (spec.kind, spec.dtype, spec.scale_dtype):
+            raise MappingError(f"Preserved chunk encoding differs from schema: {piece.hf}")
+        return PreservedQuantizedWeight(
+            obj.kind, obj.payload, obj.scales, obj.data_dtype, obj.scale_dtype, spec.shape,
+        )
+
     def tensors(self):
         for name, pieces in self.by_hf.items():
             if len(pieces) == 1:
                 tensor = self._read_piece(pieces[0])
-                if not isinstance(tensor, NativeQuantizedWeight):
+                if not isinstance(tensor, (NativeQuantizedWeight, PreservedQuantizedWeight)):
                     tensor = tensor.reshape(self.profile.shapes[name])
                 else:
                     if tuple(tensor.shape) != tuple(self.profile.shapes[name]):
