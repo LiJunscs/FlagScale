@@ -154,6 +154,22 @@ class NativeQuantizedWeight:
         return self.data.ndim
 
 
+@dataclass(frozen=True)
+class PreservedQuantizedWeight:
+    """Original quantized codewords/scales, read without dequantizing DCP."""
+
+    kind: str
+    data: torch.Tensor
+    scale: torch.Tensor
+    data_dtype: str
+    scale_dtype: str
+    shape: tuple[int, ...]
+
+    @property
+    def ndim(self):
+        return len(self.shape)
+
+
 class ShardedSafetensorWriter:
     def __init__(self, output_dir: str | Path, max_shard_size: int | str = "10GB"):
         self.output_dir = Path(output_dir).expanduser().resolve()
@@ -296,4 +312,3 @@ def write_hf_checkpoint(
             json.dumps(output_config, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
     return writer.finish()
-

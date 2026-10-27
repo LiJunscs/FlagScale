@@ -71,7 +71,7 @@ def naming_specs(specs):
             for name, spec in specs.items()}
 
 
-def with_storage_dtypes(source, dtypes, *, native=None):
+def with_storage_dtypes(source, dtypes, *, native=None, preserved=None):
     """Bind logical output names to actual DCP dtypes, including generated bias.
 
     `native` optionally maps HF names to their original quantized HF template
@@ -80,15 +80,28 @@ def with_storage_dtypes(source, dtypes, *, native=None):
     of a dense dtype: FP8-origin weights keep their original payload/scale
     layout, MXFP4-origin weights are re-stored as FP8 E4M3 with FP32 block
     scales (the mcore->hf direction never decodes MXFP4).
+
+    `preserved` comes from the actual checkpoint's portable storage descriptor,
+    retaining FP8/MXFP4 and scale dtypes while rebinding the output HF names.
     """
     codes = {"torch.bfloat16": "BF16", "torch.float16": "F16", "torch.float32": "F32",
              "torch.int32": "I32", "torch.int64": "I64"}
-    native = native or {}
+    native, preserved = native or {}, preserved or {}
     if source.keys != set(dtypes):
         raise MappingError("Actual source dtype coverage differs from mapped HF targets")
     specs = {}
     for name, spec in source.specs.items():
-        if name in native:
+        if name in preserved and preserved[name].kind != "dense":
+            origin = preserved[name]
+            if origin.kind not in {"fp8", "mxfp4"} or origin.shape != spec.shape:
+                raise MappingError(f"Preserved source encoding/shape differs from target: {name}")
+            suffix = next((suffix for suffix in SCALE_SUFFIXES if origin.scale.endswith(suffix)), None)
+            if suffix is None:
+                raise MappingError(f"Unknown preserved scale name: {origin.scale}")
+            specs[name] = replace(spec, dtype=origin.dtype, kind=origin.kind,
+                                  scale=spec.name.removesuffix(".weight") + suffix,
+                                  scale_dtype=origin.scale_dtype)
+        elif name in native:
             origin = native[name]
             if origin.kind not in ("fp8", "mxfp4"):
                 raise MappingError(
@@ -160,4 +173,3 @@ def check_mcore_schema(profile, schema):
             "torch.bfloat16", "torch.float16", "torch.float32"}
         if dtype not in allowed:
             raise MappingError(f"Unsupported native DCP storage dtype: {piece.key}: {dtype}")
-

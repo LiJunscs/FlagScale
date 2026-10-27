@@ -5,8 +5,8 @@
 
 The native checkpoint uses E4M3 + 128x128 scales, and optionally routed
 experts packed low-nibble-first as E2M1 + one E8M0 scale per 32 values.
-MCore's standard DCP checkpoint contains dense model tensors, not these HF byte
-layouts or Transformer Engine quantizer state. All scale arithmetic uses FP32.
+DCP can contain ordinary dense tensors or losslessly preserved HF payloads
+with a FlagScale logical tensor adapter. All scale arithmetic uses FP32.
 """
 
 from __future__ import annotations
@@ -20,7 +20,11 @@ from typing import Any, Mapping
 
 import torch
 
-from tools.checkpoint.deepseek_v4.hf_io import NativeQuantizedWeight, RawEncoded, SafetensorReader
+from flagscale.train.utils.quantized_checkpoint import FP4_VALUES as FP4_VALUES
+from flagscale.train.utils.quantized_checkpoint import decode_quantized_matrix, e4m3_values
+from tools.checkpoint.deepseek_v4.hf_io import (
+    NativeQuantizedWeight, PreservedQuantizedWeight, RawEncoded, SafetensorReader,
+)
 
 
 class PrecisionError(ValueError):
@@ -32,8 +36,6 @@ HEADER_DTYPES = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.floa
 FP8_DTYPES = {"F8_E4M3", "F8_E4M3FN"}
 E8M0_DTYPES = {"F8_E8M0", "F8_E8M0FNU"}
 SCALE_SUFFIXES = (".weight_scale_inv", ".scale")
-FP4_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-              -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
 
 
 def canonical_hf_name(name: str) -> str:
@@ -182,24 +184,11 @@ class PrecisionSource:
         else:
             packed = self.reader.get_bytes(spec.name)
             scale = self._scale(spec)
-            result = torch.empty(spec.shape, dtype=self.dtype, device="cpu")
-            # Bound temporary FP32 storage to 128 rows of one matrix.
-            table = FP4_VALUES if spec.kind == "mxfp4" else _fp8_table()
-            lut = torch.tensor(table, dtype=torch.float32, device=self.device)
-            for row in range(0, spec.shape[0], 128):
-                data = packed[row:row + 128].to(self.device)
-                if spec.kind == "mxfp4":
-                    decoded = torch.stack((lut[(data & 15).long()], lut[(data >> 4).long()]), -1).flatten(1)
-                    values = decoded.reshape(data.shape[0], -1, 32) * scale[row:row + 128, :, None]
-                    values = values.reshape(data.shape[0], -1)
-                else:
-                    values = lut[data.long()]
-                    multiplier = scale[row // 128].repeat_interleave(128)[:spec.shape[1]]
-                    values = values * multiplier
-                converted = values.to(self.dtype)
-                if not bool(torch.isfinite(converted).all()):
-                    raise PrecisionError(f"Non-finite/overflowing dequantized weight: {spec.name}")
-                result[row:row + 128].copy_(converted.cpu())
+            try:
+                result = decode_quantized_matrix(packed, scale, spec.kind, spec.shape,
+                                                  self.dtype, device=self.device)
+            except ValueError as error:
+                raise PrecisionError(f"Non-finite/overflowing dequantized weight: {spec.name}") from error
             self.consumed.add(spec.scale)
         self.consumed.add(spec.name)
         return result
@@ -211,15 +200,7 @@ class PrecisionSource:
 
 
 def _fp8_table() -> list[float]:
-    result = []
-    for byte in range(256):
-        exponent, mantissa = (byte >> 3) & 15, byte & 7
-        magnitude = (mantissa * 2.0**-9 if exponent == 0
-                     else (1 + mantissa / 8) * 2.0**(exponent - 7))
-        if exponent == 15 and mantissa == 7:
-            magnitude = float("nan")
-        result.append(-magnitude if byte & 128 else magnitude)
-    return result
+    return e4m3_values()
 
 
 @dataclass(frozen=True)
@@ -239,6 +220,8 @@ class PrecisionPolicy:
     source_quantized_kinds: tuple[str, ...] = ()
     native_fp8: bool = False
     native_export: bool = False
+    preserve_storage: bool = False
+    storage_mode: str = "dense"
 
     def report(self) -> dict:
         return dict(dtype=self.dtype, device=self.device,
@@ -253,10 +236,14 @@ class PrecisionPolicy:
                     unquantized_module_count=len(self.unquantized_modules),
                     native_fp8=self.native_fp8,
                     native_export=self.native_export,
-                    scale_handling=("native_te_fp8_qt_storage" if self.native_fp8
+                    preserve_storage=self.preserve_storage, storage_mode=self.storage_mode,
+                    load_decode_dtype="fp32" if self.preserve_storage else None,
+                    scale_handling=("original_payloads_and_scales_in_dcp" if self.preserve_storage
+                                    else "native_te_fp8_qt_storage" if self.native_fp8
                                     else "native_quantized_byte_export" if self.native_export
                                     else "restore_original_bytes_after_model_verification" if self.preserve_quantization
                                     else "decode_for_mcore_and_archive_original_bytes" if self.archive_quantization
+                                    else "decode_to_dense_dcp" if self.source_quantized_kinds and self.storage_mode == "dense"
                                     else "no_quantization"))
 
 
@@ -286,7 +273,8 @@ def _output_quantization_layout(specs):
 
 
 def resolve_precision(source, config: Mapping[str, Any], requested: str, device: str, *,
-                      to_mcore: bool, archive=None, native_export: bool = False) -> PrecisionPolicy:
+                      to_mcore: bool, archive=None, native_export: bool = False,
+                      storage_mode: str | None = None) -> PrecisionPolicy:
     """Use actual source storage, never GPU capabilities or a reference recipe.
 
     For export, source specs must come from DCP metadata. An archive is accepted
@@ -296,6 +284,12 @@ def resolve_precision(source, config: Mapping[str, Any], requested: str, device:
     """
     if source is None:
         raise PrecisionError("Actual source dtype metadata is required")
+    if storage_mode not in (None, "dense", "preserve"):
+        raise PrecisionError(f"Unsupported conversion mode: {storage_mode}")
+    if storage_mode == "preserve" and requested != "auto":
+        raise PrecisionError("preserve mode requires --dtype auto; source encodings must not be cast")
+    if storage_mode == "preserve" and not to_mcore:
+        native_export = bool(source.low_precision_kinds)
     if requested not in {"auto", *DENSE_DTYPES} and requested != "fp8":
         raise PrecisionError(f"Unsupported dtype: {requested}")
     if archive is not None and (to_mcore or requested != "auto"):
@@ -329,7 +323,7 @@ def resolve_precision(source, config: Mapping[str, Any], requested: str, device:
             "Native quantized DCP storage needs a supported MCore storage adapter; "
             "HF reference formats cannot describe it. Pass --export-native-quantization "
             "to keep FP8 payloads and scales as HF bytes")
-    if native_export and kinds and kinds != {"fp8"}:
+    if native_export and kinds and kinds != {"fp8"} and storage_mode != "preserve":
         raise PrecisionError(f"Native export requires fp8 storage only: {sorted(kinds)}")
     native_noop = False
     if native_export and not kinds:
@@ -344,8 +338,8 @@ def resolve_precision(source, config: Mapping[str, Any], requested: str, device:
         if code:
             populations[code] += math.prod(spec.shape)
     dtype = requested if requested != "auto" else max(populations, key=populations.get, default="bf16")
-    # Use a fixed BF16 model representation for HF quantized weights, independent
-    # of other dense buffers and hardware. Raw weights/scales remain archived.
+    # Use BF16 as the default target model dtype for quantized inputs. Preserve
+    # storage is independent of this default; its load adapter decodes in FP32.
     if to_mcore and kinds and requested == "auto":
         dtype = "bf16"
     native_fp8 = requested == "fp8"
@@ -362,7 +356,7 @@ def resolve_precision(source, config: Mapping[str, Any], requested: str, device:
         notes.append(f"{label} declares quantization, but actual source weights are dense; "
                      "preserving source tensor dtypes with --dtype auto and ignoring that recipe. "
                      "No quantization or scale tensors will be generated.")
-    if to_mcore and kinds:
+    if to_mcore and kinds and storage_mode is None:
         notes.append("HF quantized weights are decoded for standard MCore model tensors; original "
                      "payloads and scales are archived in hf_quantized/. This archive is not TE "
                      "quantizer state and is not used automatically by training or HF export.")
@@ -374,28 +368,37 @@ def resolve_precision(source, config: Mapping[str, Any], requested: str, device:
         layout = {**source.specs, **archive.output_specs}
         modules, expert_dtype = _output_quantization_layout(layout)
         restored_kinds = tuple(sorted(archive.source.low_precision_kinds))
+    elif storage_mode == "preserve":
+        restored_kinds = tuple(sorted(kinds))
     reason = ("Restore source archive bytes after current model dtype/shape/value verification"
               if archive is not None else "Preserve actual source tensor dtypes; reference precision is not applied")
     if to_mcore and kinds:
         reason = "Preserve dense source dtypes; decode quantized model tensors and archive original payloads/scales"
+    if storage_mode == "dense":
+        reason = "Decode quantized inputs into ordinary MCore DCP tensors; preserve dense source dtypes with auto"
+    if storage_mode == "preserve":
+        reason = "Preserve original E4M3/MXFP4 payloads and scale storage in DCP; decode only when loading model tensors"
     if native_fp8:
         reason = ("Native TE Float8BlockwiseQTensor storage for quantized tensors: FP8 payloads and "
                   "128x128 scales are preserved byte-exactly; MXFP4 experts are requantized to E4M3 "
                   "blockwise 128x128; dense tensors keep their source dtypes")
-    if native_export:
+    if native_export and storage_mode != "preserve":
         reason = ("Native byte-level export: FP8 E4M3 payloads and E8M0 scales preserved bit-exactly; "
                   "MXFP4-origin experts stay E4M3 with FP32 block scales; dense tensors keep source dtypes")
     if requested != "auto" and requested in DENSE_DTYPES:
         reason = "Explicit dense dtype override; FP32 stability tensors and integer tables remain unchanged"
     return PrecisionPolicy(
         dtype, device, archive is not None, reason,
-        preserve_source_dtypes=requested == "auto", archive_quantization=to_mcore and bool(kinds),
+        preserve_source_dtypes=requested == "auto",
+        archive_quantization=to_mcore and bool(kinds) and storage_mode is None,
         quantized_kinds=restored_kinds, unquantized_modules=modules, expert_dtype=expert_dtype,
         warnings=tuple(notes), source_dtype_counts=tuple(sorted(Counter(
             spec.dtype for spec in source.specs.values()).items())),
         source_quantized_kinds=tuple(sorted(kinds)),
         native_fp8=native_fp8,
         native_export=native_export,
+        preserve_storage=storage_mode == "preserve" and to_mcore,
+        storage_mode=storage_mode or ("native-fp8" if native_fp8 else "dense"),
     )
 
 
@@ -411,11 +414,17 @@ def output_config(config: Mapping[str, Any], policy: PrecisionPolicy, *, archive
     result["expert_dtype"] = policy.expert_dtype or policy.dtype
     if policy.native_export:
         quant = config.get("quantization_config")
-        if not isinstance(quant, Mapping) or not quant:
+        if (not isinstance(quant, Mapping) or not quant) and (
+                policy.storage_mode != "preserve" or "fp8" in policy.quantized_kinds):
             raise PrecisionError(
                 "Native quantized export requires a quantization_config in the mapping-plan target config")
-        result["quantization_config"] = copy.deepcopy(dict(quant))
-        result["quantization_config"]["modules_to_not_convert"] = list(policy.unquantized_modules)
+        if quant:
+            result["quantization_config"] = copy.deepcopy(dict(quant))
+            result["quantization_config"]["modules_to_not_convert"] = list(policy.unquantized_modules)
+        if policy.storage_mode == "preserve":
+            for field in ("scale_fmt", "scale_dtype"):
+                if field in config:
+                    result[field] = copy.deepcopy(config[field])
         result["expert_dtype"] = policy.expert_dtype or "fp8"
         return result
     if policy.preserve_quantization:
@@ -472,10 +481,23 @@ def encode_hf_tensors(tensors, source, policy: PrecisionPolicy, config: Mapping[
         if spec and name.endswith("wo_a.weight") and tensor.ndim == 3 and len(spec.shape) == 2:
             if spec.shape == (tensor.shape[0] * tensor.shape[1], tensor.shape[2]):
                 tensor = tensor.flatten(0, 1)
-        if not isinstance(tensor, NativeQuantizedWeight):
+        if not isinstance(tensor, (NativeQuantizedWeight, PreservedQuantizedWeight)):
             if spec and tuple(tensor.shape) != spec.shape:
                 raise PrecisionError(f"HF output shape mismatch: {name} {tuple(tensor.shape)} != {spec.shape}")
         output_name = spec.name if spec else name
+        if isinstance(tensor, PreservedQuantizedWeight):
+            if not policy.native_export or spec is None or spec.kind != tensor.kind:
+                raise PrecisionError(f"Preserved quantized output lacks its source storage policy: {name}")
+            if tuple(tensor.shape) != tuple(spec.shape):
+                raise PrecisionError(f"Preserved quantized shape mismatch: {name}")
+            if tensor.data_dtype != spec.dtype or tensor.scale_dtype != spec.scale_dtype:
+                raise PrecisionError(f"Preserved quantized dtype mismatch: {name}")
+            yield output_name, RawEncoded(tensor.data, tensor.data_dtype)
+            if tensor.scale_dtype in {*E8M0_DTYPES, "U8"}:
+                yield spec.scale, RawEncoded(tensor.scale, tensor.scale_dtype)
+            else:
+                yield spec.scale, tensor.scale
+            continue
         if policy.native_export and isinstance(tensor, NativeQuantizedWeight):
             if spec is None or spec.kind != "fp8" or not spec.scale:
                 raise PrecisionError(f"Native export requires an fp8 spec with a scale: {name}")
