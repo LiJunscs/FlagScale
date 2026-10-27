@@ -7,9 +7,9 @@ import pytest
 import torch
 from torch.distributed.checkpoint import FileSystemReader, load
 
-from tools.checkpoint.hf_mcore_dist.convert import main
-from tools.checkpoint.hf_mcore_dist.hf_io import RawEncoded, SafetensorReader, ShardedSafetensorWriter
-from tools.checkpoint.hf_mcore_dist.operators import transform
+from tools.checkpoint.hf_mcore_dcp.convert import main
+from tools.checkpoint.hf_mcore_dcp.hf_io import RawEncoded, SafetensorReader, ShardedSafetensorWriter
+from tools.checkpoint.hf_mcore_dcp.operators import transform
 
 ROOT = Path(__file__).resolve().parents[4]
 
@@ -144,7 +144,7 @@ def test_generated_tensors_and_zero_omission_are_explicit(tmp_path):
 
 def test_qkv_source_matrices_are_read_once_per_target(tmp_path, monkeypatch):
     from collections import Counter
-    from tools.checkpoint.hf_mcore_dist.quantization import PrecisionSource
+    from tools.checkpoint.hf_mcore_dcp.quantization import PrecisionSource
     reads = Counter()
     original = PrecisionSource.get_tensor
     def counted(self, name):

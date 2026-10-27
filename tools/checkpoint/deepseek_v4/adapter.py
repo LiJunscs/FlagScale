@@ -7,7 +7,7 @@ pipeline. User-declared tensor layouts are executed by the shared compiler.
 """
 from copy import deepcopy
 
-from tools.checkpoint.hf_mcore_dist import MappingError
+from tools.checkpoint.hf_mcore_dcp import MappingError
 
 LAYER_RATIOS = {"sliding_attention": 0, "compressed_sparse_attention": 4,
                 "heavily_compressed_attention": 128}

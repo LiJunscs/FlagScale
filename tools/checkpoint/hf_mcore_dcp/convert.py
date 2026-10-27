@@ -16,10 +16,10 @@ from types import SimpleNamespace
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from tools.checkpoint.hf_mcore_dist import MappingError
-from tools.checkpoint.hf_mcore_dist.config import translate_config
-from tools.checkpoint.hf_mcore_dist.mapping import load_mapping
-from tools.checkpoint.hf_mcore_dist.world_one import require_world_one
+from tools.checkpoint.hf_mcore_dcp import MappingError
+from tools.checkpoint.hf_mcore_dcp.config import translate_config
+from tools.checkpoint.hf_mcore_dcp.mapping import load_mapping
+from tools.checkpoint.hf_mcore_dcp.world_one import require_world_one
 
 
 def _json(path):
@@ -30,14 +30,14 @@ def _json(path):
 
 
 def prepare(args):
-    from tools.checkpoint.hf_mcore_dist.artifacts import read_mcore_artifacts, resolve_iteration_dir
-    from tools.checkpoint.hf_mcore_dist.engine import DTYPE_CODES, compile_mapping, plan_report
-    from tools.checkpoint.hf_mcore_dist.hf_io import SafetensorReader, parse_size
-    from tools.checkpoint.hf_mcore_dist.naming import bind_names, name_templates, normalize_name
-    from tools.checkpoint.hf_mcore_dist.precision import DENSE_DTYPES, TensorSpec
-    from tools.checkpoint.hf_mcore_dist.quantization import PrecisionSource, resolve_precision
-    from tools.checkpoint.hf_mcore_dist.regions import compile_regions, validate_preserve
-    from tools.checkpoint.hf_mcore_dist.streaming import StreamingCheckpointReader, _groups, _storage_dtype
+    from tools.checkpoint.hf_mcore_dcp.artifacts import read_mcore_artifacts, resolve_iteration_dir
+    from tools.checkpoint.hf_mcore_dcp.engine import DTYPE_CODES, compile_mapping, plan_report
+    from tools.checkpoint.hf_mcore_dcp.hf_io import SafetensorReader, parse_size
+    from tools.checkpoint.hf_mcore_dcp.naming import bind_names, name_templates, normalize_name
+    from tools.checkpoint.hf_mcore_dcp.precision import DENSE_DTYPES, TensorSpec
+    from tools.checkpoint.hf_mcore_dcp.quantization import PrecisionSource, resolve_precision
+    from tools.checkpoint.hf_mcore_dcp.regions import compile_regions, validate_preserve
+    from tools.checkpoint.hf_mcore_dcp.streaming import StreamingCheckpointReader, _groups, _storage_dtype
 
     require_world_one()
     forward = args.command == "hf-to-mcore"
@@ -154,11 +154,11 @@ def prepare(args):
 
 def execute(context):
     import torch
-    from tools.checkpoint.hf_mcore_dist.hf_io import ShardedSafetensorWriter, copy_hf_assets
-    from tools.checkpoint.hf_mcore_dist.quantization import decode_stored_tensor, encode_hf_tensors, output_config
-    from tools.checkpoint.hf_mcore_dist.precision import DENSE_DTYPES
-    from tools.checkpoint.hf_mcore_dist.streaming import save_streaming_checkpoint
-    from tools.checkpoint.hf_mcore_dist.transaction import _staged_output
+    from tools.checkpoint.hf_mcore_dcp.hf_io import ShardedSafetensorWriter, copy_hf_assets
+    from tools.checkpoint.hf_mcore_dcp.quantization import decode_stored_tensor, encode_hf_tensors, output_config
+    from tools.checkpoint.hf_mcore_dcp.precision import DENSE_DTYPES
+    from tools.checkpoint.hf_mcore_dcp.streaming import save_streaming_checkpoint
+    from tools.checkpoint.hf_mcore_dcp.transaction import _staged_output
 
     c, args = context, context.args
     inputs = [args.source] + ([args.hf_reference] if args.hf_reference else [])
@@ -186,7 +186,7 @@ def execute(context):
                     yield name, tensor
                 for node in c.plan["nodes"]:
                     if node.get("generate"):
-                        from tools.checkpoint.hf_mcore_dist.engine import STORAGE_DTYPES
+                        from tools.checkpoint.hf_mcore_dcp.engine import STORAGE_DTYPES
                         item = node["generate"]
                         for name in node["outputs"]:
                             yield name, torch.full(item["shape"], item["value"], dtype=STORAGE_DTYPES[item["dtype"]])

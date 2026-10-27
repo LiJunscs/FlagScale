@@ -1,6 +1,6 @@
 # DSv4 differences over the shared weight/parameter dictionaries.
 schema_version: 1
-extends: ../hf_mcore_dist/mapping.yaml
+extends: ../hf_mcore_dcp/mapping.yaml
 profile: deepseek_v4
 adapter: tools.checkpoint.deepseek_v4.adapter
 naming:

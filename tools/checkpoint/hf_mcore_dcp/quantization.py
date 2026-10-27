@@ -17,14 +17,14 @@ from collections import Counter
 from typing import Any, Mapping
 
 import torch
-from tools.checkpoint.hf_mcore_dist.precision import (
+from tools.checkpoint.hf_mcore_dcp.precision import (
     DENSE_DTYPES, HEADER_DTYPES, FP8_DTYPES, E8M0_DTYPES, SCALE_SUFFIXES,
     PrecisionError, TensorSpec, PrecisionPolicy,
 )
 
 from .codecs import FP4_VALUES as FP4_VALUES
 from .codecs import decode_quantized_matrix, e4m3_values
-from tools.checkpoint.hf_mcore_dist.hf_io import (
+from tools.checkpoint.hf_mcore_dcp.hf_io import (
     NativeQuantizedWeight, PreservedQuantizedWeight, RawEncoded, SafetensorReader,
 )
 

@@ -9,14 +9,14 @@ import pytest
 import torch
 from torch.distributed.checkpoint import FileSystemReader, load
 
-from tools.checkpoint.hf_mcore_dist import MappingError
-from tools.checkpoint.hf_mcore_dist.config import resolve, translate_config
-from tools.checkpoint.hf_mcore_dist.convert import main
-from tools.checkpoint.hf_mcore_dist.engine import compile_mapping
-from tools.checkpoint.hf_mcore_dist.hf_io import RawEncoded, SafetensorReader, ShardedSafetensorWriter
-from tools.checkpoint.hf_mcore_dist.mapping import load_mapping
-from tools.checkpoint.hf_mcore_dist.operators import transform
-from tools.checkpoint.hf_mcore_dist.precision import TensorSpec
+from tools.checkpoint.hf_mcore_dcp import MappingError
+from tools.checkpoint.hf_mcore_dcp.config import resolve, translate_config
+from tools.checkpoint.hf_mcore_dcp.convert import main
+from tools.checkpoint.hf_mcore_dcp.engine import compile_mapping
+from tools.checkpoint.hf_mcore_dcp.hf_io import RawEncoded, SafetensorReader, ShardedSafetensorWriter
+from tools.checkpoint.hf_mcore_dcp.mapping import load_mapping
+from tools.checkpoint.hf_mcore_dcp.operators import transform
+from tools.checkpoint.hf_mcore_dcp.precision import TensorSpec
 
 ROOT = Path(__file__).resolve().parents[4]
 
@@ -207,8 +207,8 @@ def test_failed_conversion_does_not_replace_output(tmp_path):
 
 def test_common_archive_restores_exact_bytes_and_rejects_changed_weights(tmp_path):
     from dataclasses import replace
-    from tools.checkpoint.hf_mcore_dist.quantization import PrecisionSource
-    from tools.checkpoint.hf_mcore_dist.quantized_archive import QuantizedArchive, save_quantized_archive
+    from tools.checkpoint.hf_mcore_dcp.quantization import PrecisionSource
+    from tools.checkpoint.hf_mcore_dcp.quantized_archive import QuantizedArchive, save_quantized_archive
 
     hf = tmp_path / "hf"
     hf.mkdir()
@@ -246,8 +246,8 @@ class NoTraining:
 sys.meta_path.insert(0, NoTraining())
 from pathlib import Path
 import torch, json
-from tools.checkpoint.hf_mcore_dist.convert import main
-from tools.checkpoint.hf_mcore_dist.hf_io import ShardedSafetensorWriter
+from tools.checkpoint.hf_mcore_dcp.convert import main
+from tools.checkpoint.hf_mcore_dcp.hf_io import ShardedSafetensorWriter
 root=Path(sys.argv[1]); hf=root/'hf'; hf.mkdir()
 (hf/'config.json').write_text('{}')
 w=ShardedSafetensorWriter(hf); w.add('w',torch.ones(2,3)); w.finish()
@@ -262,7 +262,7 @@ assert main(['mcore-to-hf','--source',str(root/'mc'),'--output',str(root/'out')]
 
 
 def test_dense_scale_suffix_is_not_assumed_to_be_quantization(tmp_path):
-    from tools.checkpoint.hf_mcore_dist.quantization import PrecisionSource
+    from tools.checkpoint.hf_mcore_dcp.quantization import PrecisionSource
     hf = tmp_path / "hf"
     make_hf(hf, {"norm.scale": torch.ones(4), "projection.weight_scale_inv": torch.ones(2)})
     source = PrecisionSource(SafetensorReader(hf), {})
@@ -271,7 +271,7 @@ def test_dense_scale_suffix_is_not_assumed_to_be_quantization(tmp_path):
 
 
 def test_common_parameter_dictionary_is_sparse_and_model_overrides_are_explicit():
-    common = load_mapping(ROOT / "tools/checkpoint/hf_mcore_dist/parameters.yaml")
+    common = load_mapping(ROOT / "tools/checkpoint/hf_mcore_dcp/parameters.yaml")
     assert translate_config(common, {}, True) == {}
     assert translate_config(common, {}, False) == {}
     assert translate_config(common, {"hidden_size": 128}, True) == {"hidden_size": 128}
@@ -301,7 +301,7 @@ def test_absent_optional_module_does_not_require_its_configuration():
 
 def test_models_inherit_shared_weight_rules_without_duplicate_tables():
     import yaml
-    common = load_mapping(ROOT / "tools/checkpoint/hf_mcore_dist/mapping.yaml")
+    common = load_mapping(ROOT / "tools/checkpoint/hf_mcore_dcp/mapping.yaml")
     path = ROOT / "tools/checkpoint/deepseek_v4/mapping.yaml"
     delta = yaml.safe_load(path.read_text())
     resolved = load_mapping(path)
