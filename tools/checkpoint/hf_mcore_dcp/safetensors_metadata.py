@@ -9,7 +9,7 @@ import math
 import struct
 from pathlib import Path
 
-from tools.checkpoint.hf_mcore_dist.safetensors_index import read_safetensors_index
+from tools.checkpoint.hf_mcore_dcp.safetensors_index import read_safetensors_index
 
 
 class HuggingFaceIOError(RuntimeError):

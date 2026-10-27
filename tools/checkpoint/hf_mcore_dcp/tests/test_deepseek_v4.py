@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 import torch
 
-from tools.checkpoint.hf_mcore_dist.convert import main
-from tools.checkpoint.hf_mcore_dist.hf_io import RawEncoded, SafetensorReader, ShardedSafetensorWriter
-from tools.checkpoint.hf_mcore_dist.mapping import load_mapping
+from tools.checkpoint.hf_mcore_dcp.convert import main
+from tools.checkpoint.hf_mcore_dcp.hf_io import RawEncoded, SafetensorReader, ShardedSafetensorWriter
+from tools.checkpoint.hf_mcore_dcp.mapping import load_mapping
 
 ROOT = Path(__file__).resolve().parents[4]
 TABLE = ROOT / "tools/checkpoint/deepseek_v4/mapping.yaml"

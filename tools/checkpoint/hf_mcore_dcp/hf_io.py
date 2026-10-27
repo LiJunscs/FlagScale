@@ -15,7 +15,7 @@ from typing import Iterable
 
 import torch
 
-from tools.checkpoint.hf_mcore_dist.safetensors_metadata import (
+from tools.checkpoint.hf_mcore_dcp.safetensors_metadata import (
     HuggingFaceIOError,
     SafetensorMetadataReader,
 )

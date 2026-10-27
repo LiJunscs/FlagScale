@@ -12,7 +12,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tools.checkpoint.hf_mcore_dist.world_one import require_world_one
+from tools.checkpoint.hf_mcore_dcp.world_one import require_world_one
 
 
 def _write_json(path, payload):
@@ -29,8 +29,8 @@ def _reader_inventory(reader):
 def probe_weights(args):
     """Inspect an existing HF export without importing or constructing models."""
     require_world_one()
-    from tools.checkpoint.hf_mcore_dist.safetensors_index import read_safetensors_index
-    from tools.checkpoint.hf_mcore_dist.safetensors_metadata import SafetensorMetadataReader
+    from tools.checkpoint.hf_mcore_dcp.safetensors_index import read_safetensors_index
+    from tools.checkpoint.hf_mcore_dcp.safetensors_metadata import SafetensorMetadataReader
 
     directory = Path(args.hf_model).expanduser().resolve()
     config_path = directory / "config.json"
@@ -107,13 +107,13 @@ def diff(args):
 
 
 def probe_mcore(args):
-    from tools.checkpoint.hf_mcore_dist.artifacts import read_mcore_artifacts
+    from tools.checkpoint.hf_mcore_dcp.artifacts import read_mcore_artifacts
     _write_json(args.output, {"schema_version": 2, "kind": "mcore_config_inventory",
                               **read_mcore_artifacts(args.mcore_path)})
 
 
 def mapping(args):
-    from tools.checkpoint.hf_mcore_dist.convert import build_parser, prepare
+    from tools.checkpoint.hf_mcore_dcp.convert import build_parser, prepare
     command = "mcore-to-hf" if args.mcore_path else "hf-to-mcore"
     source = args.mcore_path or args.hf_model
     if not source:
