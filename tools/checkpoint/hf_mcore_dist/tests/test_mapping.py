@@ -268,3 +268,49 @@ def test_dense_scale_suffix_is_not_assumed_to_be_quantization(tmp_path):
     source = PrecisionSource(SafetensorReader(hf), {})
     assert source.keys == {"norm.scale", "projection.weight_scale_inv"}
     assert all(spec.kind == "dense" for spec in source.specs.values())
+
+
+def test_common_parameter_dictionary_is_sparse_and_model_overrides_are_explicit():
+    common = load_mapping(ROOT / "tools/checkpoint/hf_mcore_dist/parameters.yaml")
+    assert translate_config(common, {}, True) == {}
+    assert translate_config(common, {}, False) == {}
+    assert translate_config(common, {"hidden_size": 128}, True) == {"hidden_size": 128}
+    assert translate_config(common, {"num_moe_experts": 8}, False) == {"n_routed_experts": 8}
+    assert translate_config(common, {"head_dim": 64}, True) == {"kv_channels": 64}
+    ds = load_mapping(ROOT / "tools/checkpoint/deepseek_v4/mapping.yaml")
+    assert translate_config({"config_map": {"head_dim": ds["config_map"]["head_dim"]}},
+                            {"head_dim": 64}, True) == {"v_head_dim": 64}
+    # Defaults and alternate meanings are model deltas, not activated by the common registry.
+    assert "sliding_window" not in common["config_map"]
+    assert ds["config_map"]["sliding_window"] == "csa_window_size"
+    assert ds["config_map"]["num_hash_layers"]["hf_default"] == 0
+    assert common["config_map"]["num_hash_layers"] == "moe_n_hash_layers"
+
+
+def test_absent_optional_module_does_not_require_its_configuration():
+    mapping = {"rules": [
+        {"id": "core", "hf": ["w"], "mcore": ["w"]},
+        {"id": "experts", "optional": True, "hf": ["experts.{expert}.w"],
+         "mcore": ["experts"], "op": "stack", "collect": {"expert": "$hf.num_experts"}}]}
+    specs = {"w": TensorSpec("w", (2, 3), "F32")}
+    assert compile_mapping(mapping, specs, {"hf": {}}, forward=True)["outputs"].keys() == {"w"}
+    specs["experts.0.w"] = TensorSpec("experts.0.w", (2, 3), "F32")
+    with pytest.raises(MappingError, match="num_experts"):
+        compile_mapping(mapping, specs, {"hf": {}}, forward=True)
+
+
+def test_models_inherit_shared_weight_rules_without_duplicate_tables():
+    import yaml
+    common = load_mapping(ROOT / "tools/checkpoint/hf_mcore_dist/mapping.yaml")
+    path = ROOT / "tools/checkpoint/deepseek_v4/mapping.yaml"
+    delta = yaml.safe_load(path.read_text())
+    resolved = load_mapping(path)
+    base = {rule["id"]: rule for rule in common["rules"]}
+    merged = {rule["id"]: rule for rule in resolved["rules"]}
+    local = {rule["id"]: rule for rule in delta["rules"]}
+    for name in ("q_down", "q_up", "q_norm", "router", "expert_fc1", "expert_fc2", "shared_fc1", "shared_fc2"):
+        assert name not in local
+        assert merged[name] == base[name]
+    assert merged["attn_norm"]["mcore"] != base["attn_norm"]["mcore"]
+    assert resolved["naming"]["strip_prefix"] == common["naming"]["strip_prefix"]
+    assert not (path.parent / "parameters.yaml").exists()

@@ -142,10 +142,8 @@ def expand_rules(mapping, keys, configs, forward):
             if (not isinstance(raw.get(side), list) or not raw[side]
                     or any(not isinstance(x, str) or not x for x in raw[side])):
                 raise MappingError(f"Rule {raw['id']} requires nonempty {side} name templates")
-        collect = resolve(raw.get("collect", {}), configs)
-        if not isinstance(collect, dict) or any(
-                not isinstance(key, str) or not key.isidentifier() or type(n) is not int or n <= 0
-                for key, n in collect.items()):
+        declared_collect = raw.get("collect", {})
+        if not isinstance(declared_collect, dict):
             raise MappingError(f"Invalid collected axes: {raw['id']}")
         patterns = [_pattern(t)[0] for t in raw[source_side]]
         contexts = set()
@@ -153,9 +151,16 @@ def expand_rules(mapping, keys, configs, forward):
             for pattern in patterns:
                 match = pattern.fullmatch(key)
                 if match:
-                    contexts.add(tuple(sorted((k, v) for k, v in match.groupdict().items() if k not in collect)))
-        if not contexts and not raw.get("optional", False):
+                    contexts.add(tuple(sorted((k, v) for k, v in match.groupdict().items()
+                                              if k not in declared_collect)))
+        if not contexts:
+            if raw.get("optional", False):
+                continue  # Do not require MoE/MLA configuration for absent modules.
             raise MappingError(f"Rule {raw['id']} matches no {source_side} tensors")
+        collect = resolve(declared_collect, configs)
+        if any(not isinstance(key, str) or not key.isidentifier() or type(n) is not int or n <= 0
+               for key, n in collect.items()):
+            raise MappingError(f"Invalid collected axes: {raw['id']}")
         for ctx in sorted(contexts, key=lambda ctx: tuple(int(v) for _, v in ctx)):
             row = {**raw, "params": resolve(raw.get("params", {}), configs)}
             for side in ("hf", "mcore"):
