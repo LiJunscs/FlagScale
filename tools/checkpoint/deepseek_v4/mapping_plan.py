@@ -9,17 +9,16 @@ from collections import defaultdict
 from dataclasses import asdict
 from pathlib import Path
 
-from .artifacts import is_mcore_mtp_key, read_hf_artifacts, read_mcore_artifacts
+from tools.checkpoint.hf_mcore_dist.artifacts import is_mcore_mtp_key, read_hf_artifacts, read_mcore_artifacts
 from .config_mapping import strip_inference_config, translate_configs, without_mtp
 from .hf_config import ConversionConfigurationError, derive_compress_ratios
 from . import MappingError
 from .precision import PrecisionError, PrecisionSource, TensorSpec, is_hf_mtp_key
 from .registry import Profile, compile_profile, load_rules, rule_contexts
-from .safetensors_metadata import SafetensorMetadataReader
-from .streaming import _groups
+from tools.checkpoint.hf_mcore_dist.safetensors_metadata import SafetensorMetadataReader
+from tools.checkpoint.hf_mcore_dist.streaming import _groups
 from .weight_schema import check_mcore_schema, index_specs, instantiate_schema, key_pattern, naming_specs
-from .world_one import require_world_one
-import transformers
+from tools.checkpoint.hf_mcore_dist.world_one import require_world_one
 
 
 def _json(value):
@@ -75,7 +74,8 @@ def mcore_read_profile(source, config, args, rules):
     if len(names) != len(generated):
         raise MappingError("Duplicate generated router-bias targets")
     stored = Profile([piece for piece in profile.pieces if piece.hf not in names],
-                     {name: shape for name, shape in profile.shapes.items() if name not in names})
+                     {name: shape for name, shape in profile.shapes.items() if name not in names},
+                     profile.name, profile.revision)
     return stored, sorted(generated, key=lambda item: item["hf"])
 
 

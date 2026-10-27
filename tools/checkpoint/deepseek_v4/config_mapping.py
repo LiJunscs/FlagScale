@@ -16,76 +16,21 @@ from .hf_config import derive_compress_ratios, validate_hf_config
 from . import MappingError
 from .hf_config import num_hash_layers
 
-REVISION = "dsv4-config-v7"
-MCORE_OUTPUT_OVERRIDES = dict(
-    tensor_model_parallel_size=1, pipeline_model_parallel_size=1,
-    expert_model_parallel_size=1, expert_tensor_parallel_size=1, context_parallel_size=1,
-    virtual_pipeline_model_parallel_size=None, world_size=1, data_parallel_size=1,
-    rank=0, local_rank=0, sequence_parallel=False,
-    no_save_optim=True, no_save_rng=True,
-    iteration=0, ckpt_format="torch_dist", use_dist_ckpt=True, use_distributed_optimizer=False,
-    fp8=None, fp4=None, fp8_param_gather=False, fp4_param_gather=False,
-    fp8_param=False, fp4_param=False,
+from pathlib import Path
+import json
+from tools.checkpoint.hf_mcore_dist.config import (
+    MCORE_OUTPUT_OVERRIDES, get_alias as _get, record as _record,
+    resolve, translate_fields,
 )
-# (HF field, saved argument aliases). First alias is the training CLI spelling.
-FIELDS = (
-    ("num_hidden_layers", ("num_layers",)),
-    ("hidden_size", ("hidden_size",)),
-    ("intermediate_size", ("ffn_hidden_size",)),
-    ("num_attention_heads", ("num_attention_heads",)),
-    ("n_routed_experts", ("num_experts", "num_moe_experts")),
-    ("moe_intermediate_size", ("moe_ffn_hidden_size",)),
-    ("q_lora_rank", ("q_lora_rank",)),
-    ("qk_rope_head_dim", ("qk_pos_emb_head_dim",)),
-    ("head_dim", ("v_head_dim",)),
-    ("o_groups", ("o_groups",)), ("o_lora_rank", ("o_lora_rank",)),
-    ("sliding_window", ("csa_window_size",)),
-    ("index_n_heads", ("dsa_indexer_n_heads",)),
-    ("index_head_dim", ("dsa_indexer_head_dim",)),
-    ("index_topk", ("dsa_indexer_topk",)),
-    ("hc_mult", ("num_residual_streams",)),
-    ("hc_sinkhorn_iters", ("mhc_sinkhorn_iterations",)),
-    ("num_experts_per_tok", ("moe_router_topk",)),
-    ("num_nextn_predict_layers", ("mtp_num_layers",)),
-    ("num_hash_layers", ("moe_n_hash_layers",)),
-    ("rms_norm_eps", ("norm_epsilon", "layernorm_epsilon")),
-    ("attention_dropout", ("attention_dropout",)),
-    ("scoring_func", ("moe_router_score_function",)),
-    ("routed_scaling_factor", ("moe_router_topk_scaling_factor",)),
-    ("n_group", ("moe_router_num_groups",)),
-    ("topk_group", ("moe_router_group_topk",)),
-    ("swiglu_limit", ("activation_func_clamp_value",)),
-    ("max_position_embeddings", ("max_position_embeddings",)),
-    ("rope_theta", ("rotary_base",)),
-    ("compress_rope_theta", ("csa_compress_rotary_base",)),
-)
-# Missing architecture dimensions cannot be supplied by a different-sized template.
-REQUIRED = {
-    "num_hidden_layers", "hidden_size", "num_attention_heads", "n_routed_experts",
-    "moe_intermediate_size", "q_lora_rank", "qk_rope_head_dim", "head_dim",
-    "o_groups", "o_lora_rank", "sliding_window", "index_n_heads", "index_head_dim",
-    "index_topk", "hc_mult", "hc_sinkhorn_iters", "num_experts_per_tok",
-    "rms_norm_eps", "max_position_embeddings", "rope_theta", "compress_rope_theta",
-    "scoring_func", "attention_dropout",
-}
-YARN = {
-    "factor": "rotary_scaling_factor",
-    "original_max_position_embeddings": "original_max_position_embeddings",
-    "beta_fast": "beta_fast", "beta_slow": "beta_slow",
-    "mscale": "mscale", "mscale_all_dim": "mscale_all_dim",
-}
-# Pinned MLATransformerConfig defaults in Megatron core/transformer/transformer_config.py.
-# These fields have no FlagScale training CLI arguments, so common.pt args
-# normally omit them. Do not borrow their values from a different HF model
-# or instantiate a library config. Explicit saved values always take precedence.
-MCORE_YARN_DEFAULTS = {"beta_fast": 32, "beta_slow": 1}
-# Model-only defaults for absent optional HF fields. These are fixed profile
-# semantics, not defaults copied from a training checkpoint.
-HF_OPTIONAL_DEFAULTS = {
-    "intermediate_size": None, "num_nextn_predict_layers": 0, "num_hash_layers": 0,
-    "routed_scaling_factor": 1.0, "n_group": None, "topk_group": None, "swiglu_limit": None,
-}
-HF_YARN_DEFAULTS = {"mscale": 1.0, "mscale_all_dim": 0.0}
+
+PARAMETERS = json.loads(Path(__file__).with_name("parameters.json").read_text())
+REVISION = PARAMETERS["REVISION"]
+FIELD_RULES = PARAMETERS["fields"]
+FIELDS = [(row["hf"], row["mcore"]) for row in FIELD_RULES]
+REQUIRED = {row["hf"] for row in FIELD_RULES if row.get("required")}
+YARN = PARAMETERS["YARN"]
+MCORE_YARN_DEFAULTS = PARAMETERS["MCORE_YARN_DEFAULTS"]
+HF_YARN_DEFAULTS = PARAMETERS["HF_YARN_DEFAULTS"]
 MCORE_MODEL_FIELDS = {aliases[0] for _, aliases in FIELDS} | set(YARN.values()) | {
     "vocab_size", "padded_vocab_size", "actual_vocab_size", "make_vocab_size_divisible_by",
     "moe_shared_expert_intermediate_size", "csa_compress_ratios", "swiglu", "gated_linear_unit",
@@ -97,9 +42,7 @@ MCORE_MODEL_FIELDS = {aliases[0] for _, aliases in FIELDS} | set(YARN.values()) 
 
 # These fields control DSpark inference. They do not identify state-dict
 # tensors; actual keys are checked independently by the mapping compiler.
-INFERENCE_ONLY_FIELDS = {
-    "dspark_block_size", "dspark_noise_token_id", "dspark_target_layer_ids", "dspark_markov_rank",
-}
+INFERENCE_ONLY_FIELDS = set(PARAMETERS["INFERENCE_ONLY_FIELDS"])
 
 
 def strip_inference_config(config, *, emit=True):
@@ -129,29 +72,6 @@ def without_mtp(config, *, mcore=False):
             if key.startswith("mtp_"):
                 result.pop(key)
     return result
-
-
-def _get(args, aliases, *, required=False):
-    found = [(key, args[key]) for key in aliases if args.get(key) is not None]
-    if found:
-        if any(value != found[0][1] for _, value in found[1:]):
-            raise MappingError(f"Conflicting saved MCore aliases: {found}")
-        return found[0][1]
-    if required:
-        raise MappingError(f"Saved MCore args are missing {aliases}; supply a complete checkpoint config")
-    return None
-
-
-def _set(args, aliases, value):
-    args[aliases[0]] = deepcopy(value)
-    for key in aliases[1:]:
-        if key in args:
-            args[key] = deepcopy(value)
-
-
-def _record(rows, hf, mc, op, before, after):
-    rows.append({"hf": hf, "mcore": list(mc), "operation": op,
-                 "template_value": deepcopy(before), "source_value": deepcopy(after)})
 
 
 def _check_mcore(args):
@@ -225,21 +145,8 @@ def mcore_to_hf_config(args, template, *, vocab_size_override=None):
     result, rows = deepcopy(template), []
     for key, value in ignored.items():
         _record(rows, key, (), "ignore_inference_config", value, None)
-    for hf, aliases in FIELDS:
-        value = _get(args, aliases, required=hf in REQUIRED)
-        if hf in {"num_nextn_predict_layers", "num_hash_layers"}:
-            value = int(value or 0)
-        elif hf in {"n_group", "topk_group", "routed_scaling_factor"} and value is None:
-            value = 1  # MCore None means no grouping/scaling.
-        elif value is None:
-            # MCore None is meaningful for clamp/group/scaling options; never
-            # carry a differently configured HF value into the exported model.
-            if hf in result:
-                result[hf] = None
-            _record(rows, hf, aliases, "nullable", template.get(hf), None)
-            continue
-        result[hf] = value
-        _record(rows, hf, aliases, "copy", template.get(hf), value)
+    result, field_rows = translate_fields(FIELD_RULES, args, False, template=result)
+    rows.extend(field_rows)
     # Embedding, output and tid2eid share this unpadded row count. The streaming
     # reader crops stored padding; neither padded size nor an unrelated HF
     # reference can establish the source model's real vocabulary. Checkpoints
@@ -324,37 +231,13 @@ def hf_to_mcore_args(config):
     result, rows = {}, []
     for key, value in ignored.items():
         _record(rows, key, (), "ignore_inference_config", value, None)
-    for hf, aliases in FIELDS:
-        operation = "copy"
-        if hf not in config:
-            if hf in REQUIRED:
-                raise MappingError(f"HF config is missing {hf}; no model/library default probing is allowed")
-            value = HF_OPTIONAL_DEFAULTS[hf]
-            operation = "fixed_profile_default"
-        else:
-            value = config[hf]
-        if hf in {"num_nextn_predict_layers", "num_hash_layers"}:
-            value = int(value or 0)
-        _set(result, aliases, value)
-        _record(rows, hf, aliases, operation, None, value)
-    result.update(
-        vocab_size=int(config["vocab_size"]), padded_vocab_size=int(config["vocab_size"]),
-        actual_vocab_size=int(config["vocab_size"]),
-        make_vocab_size_divisible_by=config.get("make_vocab_size_divisible_by", 1),
-        moe_shared_expert_intermediate_size=int(config.get("n_shared_experts", 1))
-            * int(config["moe_intermediate_size"]),
-        csa_compress_ratios=derive_compress_ratios(config),
-        swiglu=True, gated_linear_unit=True, normalization="RMSNorm",
-        untie_embeddings_and_output_weights=not config.get("tie_word_embeddings", False),
-        multi_latent_attention=True, qk_layernorm=True, moe_layer_freq=1,
-        experimental_attention_variant="dsv4_hybrid", enable_hyper_connections=True,
-        rotary_percent=1.0, rotary_interleaved=False,
-        add_bias_linear=False, add_qkv_bias=False,
-        position_embedding_type="rope",
-        qk_head_dim=int(config["head_dim"]) - int(config["qk_rope_head_dim"]),
-        kv_lora_rank=int(config["head_dim"]) - int(config["qk_rope_head_dim"]),
-        kv_channels=int(config["head_dim"]),
-    )
+    result, field_rows = translate_fields(FIELD_RULES, config, True)
+    rows.extend(field_rows)
+    config.setdefault("n_shared_experts", 1)
+    config.setdefault("tie_word_embeddings", False)
+    result.update(resolve(PARAMETERS["mcore_values"], {"hf": config, "mcore": result}))
+    result.update(make_vocab_size_divisible_by=config.get("make_vocab_size_divisible_by", 1),
+                  csa_compress_ratios=derive_compress_ratios(config))
     _record(rows, "make_vocab_size_divisible_by", ("make_vocab_size_divisible_by",),
             "copy" if "make_vocab_size_divisible_by" in config else "fixed_profile_default",
             None, result["make_vocab_size_divisible_by"])

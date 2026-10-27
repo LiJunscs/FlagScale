@@ -12,7 +12,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tools.checkpoint.deepseek_v4.world_one import require_world_one
+from tools.checkpoint.hf_mcore_dist.world_one import require_world_one
 import transformers
 
 
@@ -30,8 +30,8 @@ def _reader_inventory(reader):
 def probe_weights(args):
     """Inspect an existing DSv4 export without importing or constructing models."""
     require_world_one()
-    from tools.checkpoint.deepseek_v4.safetensors_index import read_safetensors_index
-    from tools.checkpoint.deepseek_v4.safetensors_metadata import SafetensorMetadataReader
+    from tools.checkpoint.hf_mcore_dist.safetensors_index import read_safetensors_index
+    from tools.checkpoint.hf_mcore_dist.safetensors_metadata import SafetensorMetadataReader
 
     directory = Path(args.hf_model).expanduser().resolve()
     config_path = directory / "config.json"
@@ -110,7 +110,7 @@ def diff(args):
 
 
 def probe_mcore(args):
-    from tools.checkpoint.deepseek_v4.artifacts import read_mcore_artifacts
+    from tools.checkpoint.hf_mcore_dist.artifacts import read_mcore_artifacts
     _write_json(args.output, {"schema_version": 2, "kind": "mcore_config_inventory",
                               "profile": "deepseek_v4", **read_mcore_artifacts(args.mcore_path)})
 

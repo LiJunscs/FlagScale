@@ -1,7 +1,7 @@
 # Copyright 2026 FlagOS Contributors
 # Licensed under the Apache License, Version 2.0.
 
-"""Minimal safetensors reader/writer for the fixed DeepSeek-V4 schema."""
+"""Minimal safetensors reader/writer for HF checkpoints."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from typing import Iterable
 
 import torch
 
-from tools.checkpoint.deepseek_v4.safetensors_metadata import (
+from tools.checkpoint.hf_mcore_dist.safetensors_metadata import (
     HuggingFaceIOError,
     SafetensorMetadataReader,
 )
@@ -90,7 +90,7 @@ class SafetensorReader(SafetensorMetadataReader):
             from safetensors import safe_open
         except ImportError as error:
             raise HuggingFaceIOError(
-                "safetensors is required for DeepSeek-V4 conversion"
+                "safetensors is required for HF conversion"
             ) from error
         path = self.model_dir / self._weight_map[name]
         with safe_open(path, framework="pt", device="cpu") as handle:
@@ -222,7 +222,7 @@ class ShardedSafetensorWriter:
             try:
                 from safetensors.torch import save_file
             except ImportError as error:
-                raise HuggingFaceIOError("safetensors is required for DeepSeek-V4 conversion") from error
+                raise HuggingFaceIOError("safetensors is required for HF conversion") from error
             save_file(self._current, temporary_path, metadata={"format": "pt"})
         self._temporary_files.append(temporary_path)
         for name in self._current:

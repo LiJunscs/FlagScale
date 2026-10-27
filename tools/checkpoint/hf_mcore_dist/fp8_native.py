@@ -1,6 +1,6 @@
 # Copyright 2026 FlagOS Contributors
 # Licensed under the Apache License, Version 2.0.
-"""Native FP8 output storage for the DSv4 converter.
+"""Native FP8 output storage for distributed checkpoints.
 
 Quantized HF sources are written as TransformerEngine ``Float8BlockwiseQTensor``
 payloads instead of decoded BF16 tensors, so MCore training can load and run
@@ -27,10 +27,6 @@ from __future__ import annotations
 
 import torch
 
-from flagscale.train.utils.checkpoint_serialization import (
-    native_fp8_types,
-    register_native_fp8_safe_globals as _register_native_fp8_safe_globals,
-)
 
 from .precision import PrecisionError
 
@@ -56,6 +52,7 @@ class NativeFp8Target:
 
 def _te_qt_types():
     try:
+        from flagscale.train.utils.checkpoint_serialization import native_fp8_types
         return native_fp8_types()
     except ImportError as error:  # pragma: no cover - env dependent
         raise NativeFp8Error(f"{TE_IMPORT_ERROR}: {error}") from error
@@ -66,13 +63,14 @@ def require_native_fp8_capable() -> None:
 
 
 def register_native_fp8_safe_globals() -> None:
-    """Compatibility entrypoint for the shared FlagScale serialization helper.
+    """Register the shared FlagScale native-FP8 serialization types.
 
     FlagScale training registers automatically from source checkpoint metadata.
     Standalone DCP consumers can call this before loading native tensor blobs.
     """
     try:
-        _register_native_fp8_safe_globals()
+        from flagscale.train.utils.checkpoint_serialization import register_native_fp8_safe_globals as register
+        register()
     except ImportError as error:  # pragma: no cover - env dependent
         raise NativeFp8Error(f"{TE_IMPORT_ERROR}: {error}") from error
 

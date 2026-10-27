@@ -1,5 +1,4 @@
-"""DeepSeek-V4 checkpoint conversion helpers."""
-
-
-class MappingError(RuntimeError):
-    """Existing checkpoint/config metadata cannot satisfy the DSv4 mapping."""
+# Copyright 2026 FlagOS Contributors
+# Licensed under the Apache License, Version 2.0.
+"""DeepSeek-V4 checkpoint conversion preset."""
+from tools.checkpoint.hf_mcore_dist import MappingError

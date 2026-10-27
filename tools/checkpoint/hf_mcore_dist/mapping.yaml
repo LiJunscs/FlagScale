@@ -1,0 +1,65 @@
+# Common dense decoder layout. This is a user-selectable convention, not model detection.
+schema_version: 1
+profile: dense_decoder
+config_map:
+  num_hidden_layers: num_layers
+  hidden_size: hidden_size
+  intermediate_size: ffn_hidden_size
+  num_attention_heads: num_attention_heads
+  num_key_value_heads: num_query_groups
+  head_dim: kv_channels
+  vocab_size: vocab_size
+  max_position_embeddings: max_position_embeddings
+  rope_theta: rotary_base
+  rms_norm_eps: norm_epsilon
+  attention_dropout: attention_dropout
+mcore_args:
+  padded_vocab_size: $hf.vocab_size
+  make_vocab_size_divisible_by: 1
+  swiglu: true
+  gated_linear_unit: true
+  normalization: RMSNorm
+  position_embedding_type: rope
+  untie_embeddings_and_output_weights: true
+  add_bias_linear: false
+  add_qkv_bias: false
+hf_config:
+  tie_word_embeddings: false
+rules:
+  - id: embedding
+    hf: [model.embed_tokens.weight]
+    mcore: [embedding.word_embeddings.weight]
+  - id: output
+    hf: [lm_head.weight]
+    mcore: [output_layer.weight]
+  - id: final_norm
+    hf: [model.norm.weight]
+    mcore: [decoder.final_layernorm.weight]
+  - id: attention_norm
+    hf: ['model.layers.{layer}.input_layernorm.weight']
+    mcore: ['decoder.layers.{layer}.self_attention.linear_qkv.layer_norm_weight']
+  - id: qkv
+    hf: ['model.layers.{layer}.self_attn.q_proj.weight', 'model.layers.{layer}.self_attn.k_proj.weight', 'model.layers.{layer}.self_attn.v_proj.weight']
+    mcore: ['decoder.layers.{layer}.self_attention.linear_qkv.weight']
+    op: qkv
+    params:
+      heads: $hf.num_attention_heads
+      groups: $hf.num_key_value_heads
+      order: [q, k, v]
+    extra_state: ['decoder.layers.{layer}.self_attention.linear_qkv._extra_state/shard_0_1']
+  - id: attention_output
+    hf: ['model.layers.{layer}.self_attn.o_proj.weight']
+    mcore: ['decoder.layers.{layer}.self_attention.linear_proj.weight']
+    extra_state: ['decoder.layers.{layer}.self_attention.linear_proj._extra_state/shard_0_1']
+  - id: mlp_norm
+    hf: ['model.layers.{layer}.post_attention_layernorm.weight']
+    mcore: ['decoder.layers.{layer}.mlp.linear_fc1.layer_norm_weight']
+  - id: fc1
+    hf: ['model.layers.{layer}.mlp.gate_proj.weight', 'model.layers.{layer}.mlp.up_proj.weight']
+    mcore: ['decoder.layers.{layer}.mlp.linear_fc1.weight']
+    op: swiglu
+    extra_state: ['decoder.layers.{layer}.mlp.linear_fc1._extra_state/shard_0_1']
+  - id: fc2
+    hf: ['model.layers.{layer}.mlp.down_proj.weight']
+    mcore: ['decoder.layers.{layer}.mlp.linear_fc2.weight']
+    extra_state: ['decoder.layers.{layer}.mlp.linear_fc2._extra_state/shard_0_1']

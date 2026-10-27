@@ -10,7 +10,6 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 
-from .artifacts import mcore_shape_matches
 from .hf_config import derive_compress_ratios
 from . import MappingError
 from .precision import SCALE_SUFFIXES, TensorSpec, canonical_hf_name
@@ -173,3 +172,19 @@ def check_mcore_schema(profile, schema):
             "torch.bfloat16", "torch.float16", "torch.float32"}
         if dtype not in allowed:
             raise MappingError(f"Unsupported native DCP storage dtype: {piece.key}: {dtype}")
+
+
+def mcore_shape_matches(key, stored_shape, logical_shape):
+    """Allow trailing vocabulary padding only on known token-indexed matrices.
+
+    MCore gives its hash router actual_vocab_size=padded_vocab_size. Like
+    embedding/output weights, tid2eid may therefore have more rows than the
+    explicit source vocab_size exported to HF. All other axes remain exact.
+    """
+    stored, logical = tuple(stored_shape), tuple(logical_shape)
+    if stored == logical:
+        return True
+    vocab = key in {"embedding.word_embeddings.weight", "output_layer.weight"}
+    vocab |= re.fullmatch(r"decoder\.layers\.\d+\.mlp\.router\.tid2eid", key) is not None
+    return (vocab and len(stored) == len(logical) == 2
+            and stored[1:] == logical[1:] and stored[0] >= logical[0])

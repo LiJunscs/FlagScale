@@ -1,0 +1,16 @@
+# Qwen3 additions to the common dense-decoder table. Override any rule by id.
+schema_version: 1
+extends: ../hf_mcore_dist/mapping.yaml
+profile: qwen3
+mcore_args:
+  qk_layernorm: true
+hf_config:
+  model_type: qwen3
+  architectures: [Qwen3ForCausalLM]
+rules:
+  - id: q_norm
+    hf: ['model.layers.{layer}.self_attn.q_norm.weight']
+    mcore: ['decoder.layers.{layer}.self_attention.q_layernorm.weight']
+  - id: k_norm
+    hf: ['model.layers.{layer}.self_attn.k_norm.weight']
+    mcore: ['decoder.layers.{layer}.self_attention.k_layernorm.weight']

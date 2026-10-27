@@ -1,6 +1,6 @@
 # Copyright 2026 FlagOS Contributors
 # Licensed under the Apache License, Version 2.0.
-"""Serial DSv4 conversion using DCP storage plans, without a resident GPTModel.
+"""Serial checkpoint conversion using DCP storage plans, without a resident GPTModel.
 
 One global save plan is committed once. Write items are packed into file plans
 with a target payload size, then written serially to bound per-file buffering.
@@ -14,7 +14,6 @@ import io
 import json
 import math
 import os
-import re
 from collections import defaultdict
 from dataclasses import asdict
 from pathlib import Path
@@ -34,10 +33,10 @@ from torch.distributed.checkpoint.planner import (
 )
 
 from . import MappingError
-from .artifacts import is_extra_state, is_mcore_mtp_key, mcore_shape_matches, resolve_iteration_dir
+from .artifacts import is_extra_state, is_mcore_mtp_key, resolve_iteration_dir
 from .fp8_native import NativeFp8Target
 from .hf_io import NativeQuantizedWeight, PreservedQuantizedWeight, parse_size
-from .precision import DENSE_DTYPES, HEADER_DTYPES, TensorSpec, canonical_hf_name
+from .precision import DENSE_DTYPES, HEADER_DTYPES, TensorSpec
 from .world_one import require_world_one
 
 
@@ -84,8 +83,8 @@ def _storage_dtype(pieces, source, policy):
     types = {source.specs[p.hf].dtype for p in pieces}
     integers = {"I32": torch.int32, "I64": torch.int64}
     if types.intersection(integers):
-        if len(types) != 1 or any(not p.hf.endswith("tid2eid") for p in pieces):
-            raise MappingError("Integer weights are only supported for the DSv4 hash router")
+        if len(types) != 1:
+            raise MappingError("Cannot fuse different integer/floating storage dtypes")
         return integers[next(iter(types))]
     if policy.native_fp8 and all(source.specs[p.hf].kind in ("fp8", "mxfp4") for p in pieces):
         from .fp8_native import NativeFp8Target
@@ -104,13 +103,9 @@ def _storage_dtype(pieces, source, policy):
 
 def _checkpoint_args(model_args, policy):
     if model_args is None:
-        raise MappingError("MCore output requires translated model args from HF config")
+        raise MappingError("MCore output requires explicit model args")
     values = dict(model_args)
-    from .config_mapping import MCORE_MODEL_FIELDS, MCORE_OUTPUT_OVERRIDES
-
-    unknown = values.keys() - MCORE_MODEL_FIELDS - MCORE_OUTPUT_OVERRIDES.keys()
-    if unknown:
-        raise MappingError(f"Model-only checkpoint args contain non-model fields: {sorted(unknown)}")
+    from .config import MCORE_OUTPUT_OVERRIDES
     values.update(MCORE_OUTPUT_OVERRIDES)
     values.update(bf16=policy.dtype == "bf16", fp16=policy.dtype == "fp16",
                   params_dtype=DENSE_DTYPES[policy.dtype])
@@ -284,17 +279,12 @@ def _write_bucket(writer, plan, resolver):
 
 
 def save_streaming_checkpoint(source, profile, policy, config, output_root, *, model_args,
-                               max_shard_size="4GB"):
+                               max_shard_size="4GB", content_metadata=None):
     require_world_one()
     max_shard_size = parse_size(max_shard_size) if isinstance(max_shard_size, str) else max_shard_size
     if not isinstance(max_shard_size, int) or isinstance(max_shard_size, bool) or max_shard_size <= 0:
         raise MappingError("max_shard_size must be a positive byte count")
     saved_args = _checkpoint_args(model_args, policy)
-    ignored_bias = [name for name in source.specs if name.endswith(".ffn.gate.bias")
-                    and model_args.get("moe_router_enable_expert_bias") is False]
-    for name in ignored_bias:
-        if bool((source.get_tensor(name) != 0).any()):
-            raise MappingError(f"Cannot omit nonzero HF router bias with MCore expert bias disabled: {name}")
     root = Path(output_root)
     directory = root / "iter_0000000"
     directory.mkdir(parents=True, exist_ok=False)
@@ -380,9 +370,9 @@ def save_streaming_checkpoint(source, profile, policy, config, output_root, *, m
         "checkpoint_version": 3.0, "iteration": 0,
         "content_metadata": {"non_homogeneous_layers": True, "singleton_local_shards": False,
                              "checkpoint_content": "model_only", "model_config_source": "hf_config",
-                             "deepseek_v4_conversion": policy.report(),
-                             "deepseek_v4_hf_config": dict(config),
-                             "profile_revision": "dsv4-global-v1"},
+                             "conversion": policy.report(),
+                             "profile_revision": profile.revision,
+                             **(content_metadata or {})},
     }
     if preserved:
         common["content_metadata"]["preserved_quantization"] = preserved_metadata
@@ -394,7 +384,6 @@ def save_streaming_checkpoint(source, profile, policy, config, output_root, *, m
     (directory / "metadata.json").write_text(json.dumps(marker, indent=2) + "\n", encoding="utf-8")
     (root / "latest_checkpointed_iteration.txt").write_text("0", encoding="utf-8")
     return {"iteration_dir": str(directory), "stored_tensor_count": len(groups),
-            "removed_generated_hf_biases": ignored_bias,
             "stored_chunk_count": len(lookup), "extra_state_count": len(extra_keys),
             "storage_file_count": len(storage_files), "max_shard_size_bytes": max_shard_size,
             "largest_storage_file_bytes": max(
@@ -415,29 +404,8 @@ class _ReadDestination:
         pass  # FileSystemReader has already copied into the destination view.
 
 
-def hf_export_tensors(tensors, generated):
-    """Stream actual weights, then materialize only planned neutral router biases."""
-    names = set()
-    for item in generated:
-        name, shape = item["hf"], item["shape"]
-        if (item["operation"] != "zero_disabled_router_bias" or item["value"] != 0
-                or item["dtype"] != "F32" or not re.fullmatch(r"(?:layers|mtp)\.\d+\.ffn\.gate\.bias", name)
-                or canonical_hf_name(item["name"]) != name
-                or len(shape) != 1 or not isinstance(shape[0], int) or shape[0] <= 0 or name in names):
-            raise MappingError(f"Invalid generated HF router-bias target: {name}")
-        names.add(name)
-    for name, tensor in tensors:
-        if name in names:
-            raise MappingError(f"Generated HF target overlaps a stored source weight: {name}")
-        yield name, tensor
-    for item in generated:
-        tensor = torch.zeros(tuple(item["shape"]), dtype=torch.float32, device="cpu")
-        yield item["hf"], tensor
-        del tensor
-
-
 class StreamingCheckpointReader:
-    def __init__(self, checkpoint_path, profile, *, skip_mtp=False):
+    def __init__(self, checkpoint_path, profile, *, skip_mtp=False, shape_matches=None, ignore=()):
         require_world_one()
         self.directory = resolve_iteration_dir(checkpoint_path)
         self.reader = FileSystemReader(self.directory)
@@ -445,6 +413,8 @@ class StreamingCheckpointReader:
         self.reader.set_up_storage_reader(self.metadata, is_coordinator=True)
         self.profile, self.used = profile, set()
         self.skip_mtp = skip_mtp
+        self.shape_matches = shape_matches or (lambda key, actual, expected: actual == expected)
+        self.ignore = set(ignore)
         if skip_mtp and any(is_mcore_mtp_key(key) for key in profile.keys):
             raise MappingError("A plan that drops MTP must contain no MTP target regions")
         self.by_hf = defaultdict(list)
@@ -537,27 +507,26 @@ class StreamingCheckpointReader:
             if self.skip_mtp and is_mcore_mtp_key(key):
                 continue
             if key not in self.groups:
+                if key in self.ignore:
+                    continue
                 if not is_extra_state(key) and not _is_ignored(key):
                     unknown.append(key)
                 continue
             if not isinstance(entry, TensorStorageMetadata):
                 raise MappingError(f"Expected DCP tensor: {key}")
         if unknown or self.groups.keys() - self.metadata.state_dict_metadata.keys():
-            raise MappingError(f"DCP schema differs from dsv4-global-v1: unknown={unknown[:20]}, "
+            raise MappingError(f"DCP schema differs from mapping: unknown={unknown[:20]}, "
                                f"missing={sorted(self.groups.keys() - self.metadata.state_dict_metadata.keys())[:20]}")
         file_sizes = {}
         for key, pieces in self.groups.items():
             entry = self.metadata.state_dict_metadata[key]
             expected, actual = pieces[0].global_shape, tuple(entry.size)
-            if not mcore_shape_matches(key, actual, expected):
+            if not self.shape_matches(key, actual, expected):
                 raise MappingError(f"DCP global shape mismatch: {key}: {actual} != {expected}")
             dtype = entry.properties.dtype
             if dtype not in (torch.float32, torch.float16, torch.bfloat16, torch.int32, torch.int64):
                 raise MappingError(f"Unsupported raw DCP precision {dtype}: {key}; "
                                    "this adapter requires standard dense model tensors")
-            integer = dtype in (torch.int32, torch.int64)
-            if integer != all(p.hf.endswith("tid2eid") for p in pieces):
-                raise MappingError(f"Invalid DCP weight/router dtype: {key}: {dtype}")
             validate_regions(key, actual, [(tuple(c.offsets), tuple(c.sizes)) for c in entry.chunks])
             for i, chunk in enumerate(entry.chunks):
                 index = MetadataIndex(key, chunk.offsets, i)

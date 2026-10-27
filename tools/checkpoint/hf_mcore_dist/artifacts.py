@@ -8,7 +8,7 @@ import math
 import re
 from pathlib import Path
 
-from .hf_config import read_hf_config
+
 from . import MappingError
 from .safetensors_index import read_safetensors_index
 from .world_one import require_world_one
@@ -57,22 +57,6 @@ def is_mcore_mtp_key(name: str) -> bool:
     return re.match(r"^mtp\.layers\.\d+\.", name) is not None
 
 
-def mcore_shape_matches(key, stored_shape, logical_shape):
-    """Allow trailing vocabulary padding only on known token-indexed matrices.
-
-    MCore gives its hash router actual_vocab_size=padded_vocab_size. Like
-    embedding/output weights, tid2eid may therefore have more rows than the
-    explicit source vocab_size exported to HF. All other axes remain exact.
-    """
-    stored, logical = tuple(stored_shape), tuple(logical_shape)
-    if stored == logical:
-        return True
-    vocab = key in {"embedding.word_embeddings.weight", "output_layer.weight"}
-    vocab |= re.fullmatch(r"decoder\.layers\.\d+\.mlp\.router\.tid2eid", key) is not None
-    return (vocab and len(stored) == len(logical) == 2
-            and stored[1:] == logical[1:] and stored[0] >= logical[0])
-
-
 def _plain(value):
     if value is None or type(value) in (bool, int, str):
         return value
@@ -91,7 +75,9 @@ def _plain(value):
 
 def read_hf_artifacts(path):
     directory = Path(path).expanduser().resolve()
-    config = read_hf_config(directory)
+    config = json.loads((directory / "config.json").read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        raise MappingError("HF config must be an object")
     index = read_safetensors_index(directory / "model.safetensors.index.json")
     return {"directory": str(directory), "config": config,
             "weight_map": dict(sorted(index["weight_map"].items())),
@@ -111,20 +97,18 @@ def json_args(args):
 
 def read_mcore_artifacts(path):
     require_world_one()
-    import torch
     from torch.distributed.checkpoint import FileSystemReader
     from torch.distributed.checkpoint.metadata import TensorStorageMetadata
 
     directory = resolve_iteration_dir(path)
-    # Common (non-sharded) state is read with the official reader, which is
-    # format-transparent: standalone common.pt (legacy torch save) or the
-    # common_state ShardedObject inside the DCP payload (fork torch_dist
-    # save). .distcp model/optimizer tensor payloads are not read here.
-    from megatron.core.dist_checkpointing.serialization import (
-        load_common_state_dict,
-    )
-
-    common = load_common_state_dict(str(directory))
+    # Our model-only outputs have standalone common.pt; avoid importing the
+    # training runtime just to read them. Embedded common state uses MCore's reader.
+    if (directory / "common.pt").is_file():
+        import torch
+        common = torch.load(directory / "common.pt", map_location="cpu", weights_only=False)
+    else:
+        from megatron.core.dist_checkpointing.serialization import load_common_state_dict
+        common = load_common_state_dict(str(directory))
     if not isinstance(common, dict) or "args" not in common:
         raise MappingError("Existing MCore checkpoint must contain common state args")
     saved = common["args"]
@@ -134,7 +118,7 @@ def read_mcore_artifacts(path):
     if not isinstance(content, dict):
         raise MappingError("MCore content_metadata must be a mapping")
     if content.get("singleton_local_shards", False) or content.get("non_homogeneous_layers") is False:
-        raise MappingError("Only non-homogeneous, non-singleton DSv4 DCP keys are supported")
+        raise MappingError("Only non-homogeneous, non-singleton DCP keys are supported")
     metadata = FileSystemReader(directory).read_metadata()
     ignored = ("optimizer", "rng_state", "rerun_state_machine", "opt_param_scheduler",
                "common_state", "num_floating_point_operations_so_far")
@@ -147,11 +131,6 @@ def read_mcore_artifacts(path):
                     for prefix in ignored)
     }
     if not schema:
-        raise MappingError("No standard DSv4 MCore model tensor metadata was found")
+        raise MappingError("No MCore model tensor metadata was found")
     return {"directory": str(directory), "args": values, "omitted_runtime_args": omitted,
             "model_tensors": schema, "iteration": common.get("iteration")}
-
-
-if __name__ == "__main__":
-    checkpoint = "outputs/DeepSeek-V4-Flash/tp4cp1ep8_fused/iter_0000004"
-    artifacts = read_mcore_artifacts(checkpoint)
