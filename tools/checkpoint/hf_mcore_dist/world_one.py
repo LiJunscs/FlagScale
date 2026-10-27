@@ -19,10 +19,10 @@ def require_world_one(environ=None, distributed=None):
             except (TypeError, ValueError) as error:
                 raise ValueError(f"Invalid launcher setting {name}={env[name]!r}") from error
             if value != expected:
-                raise ValueError(f"DSv4 conversion requires real world_size=1/rank=0; {name}={value}")
+                raise ValueError(f"Checkpoint conversion requires real world_size=1/rank=0; {name}={value}")
     if distributed is None:
         torch = sys.modules.get("torch")
         distributed = getattr(torch, "distributed", None)
     if distributed is not None and distributed.is_initialized():
         if distributed.get_world_size() != 1 or distributed.get_rank() != 0:
-            raise ValueError("DSv4 conversion refuses an initialized multi-rank process group")
+            raise ValueError("Checkpoint conversion refuses an initialized multi-rank process group")

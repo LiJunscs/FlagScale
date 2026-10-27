@@ -1,0 +1,290 @@
+{
+  "REVISION": "dsv4-config-v7",
+  "YARN": {
+    "factor": "rotary_scaling_factor",
+    "original_max_position_embeddings": "original_max_position_embeddings",
+    "beta_fast": "beta_fast",
+    "beta_slow": "beta_slow",
+    "mscale": "mscale",
+    "mscale_all_dim": "mscale_all_dim"
+  },
+  "MCORE_YARN_DEFAULTS": {
+    "beta_fast": 32,
+    "beta_slow": 1
+  },
+  "HF_YARN_DEFAULTS": {
+    "mscale": 1.0,
+    "mscale_all_dim": 0.0
+  },
+  "INFERENCE_ONLY_FIELDS": [
+    "dspark_block_size",
+    "dspark_markov_rank",
+    "dspark_noise_token_id",
+    "dspark_target_layer_ids"
+  ],
+  "fields": [
+    {
+      "hf": "num_hidden_layers",
+      "mcore": [
+        "num_layers"
+      ],
+      "required": true
+    },
+    {
+      "hf": "hidden_size",
+      "mcore": [
+        "hidden_size"
+      ],
+      "required": true
+    },
+    {
+      "hf": "intermediate_size",
+      "mcore": [
+        "ffn_hidden_size"
+      ],
+      "hf_default": null
+    },
+    {
+      "hf": "num_attention_heads",
+      "mcore": [
+        "num_attention_heads"
+      ],
+      "required": true
+    },
+    {
+      "hf": "n_routed_experts",
+      "mcore": [
+        "num_experts",
+        "num_moe_experts"
+      ],
+      "required": true
+    },
+    {
+      "hf": "moe_intermediate_size",
+      "mcore": [
+        "moe_ffn_hidden_size"
+      ],
+      "required": true
+    },
+    {
+      "hf": "q_lora_rank",
+      "mcore": [
+        "q_lora_rank"
+      ],
+      "required": true
+    },
+    {
+      "hf": "qk_rope_head_dim",
+      "mcore": [
+        "qk_pos_emb_head_dim"
+      ],
+      "required": true
+    },
+    {
+      "hf": "head_dim",
+      "mcore": [
+        "v_head_dim"
+      ],
+      "required": true
+    },
+    {
+      "hf": "o_groups",
+      "mcore": [
+        "o_groups"
+      ],
+      "required": true
+    },
+    {
+      "hf": "o_lora_rank",
+      "mcore": [
+        "o_lora_rank"
+      ],
+      "required": true
+    },
+    {
+      "hf": "sliding_window",
+      "mcore": [
+        "csa_window_size"
+      ],
+      "required": true
+    },
+    {
+      "hf": "index_n_heads",
+      "mcore": [
+        "dsa_indexer_n_heads"
+      ],
+      "required": true
+    },
+    {
+      "hf": "index_head_dim",
+      "mcore": [
+        "dsa_indexer_head_dim"
+      ],
+      "required": true
+    },
+    {
+      "hf": "index_topk",
+      "mcore": [
+        "dsa_indexer_topk"
+      ],
+      "required": true
+    },
+    {
+      "hf": "hc_mult",
+      "mcore": [
+        "num_residual_streams"
+      ],
+      "required": true
+    },
+    {
+      "hf": "hc_sinkhorn_iters",
+      "mcore": [
+        "mhc_sinkhorn_iterations"
+      ],
+      "required": true
+    },
+    {
+      "hf": "num_experts_per_tok",
+      "mcore": [
+        "moe_router_topk"
+      ],
+      "required": true
+    },
+    {
+      "hf": "num_nextn_predict_layers",
+      "mcore": [
+        "mtp_num_layers"
+      ],
+      "hf_default": 0,
+      "normalize": "int_or_zero"
+    },
+    {
+      "hf": "num_hash_layers",
+      "mcore": [
+        "moe_n_hash_layers"
+      ],
+      "hf_default": 0,
+      "normalize": "int_or_zero"
+    },
+    {
+      "hf": "rms_norm_eps",
+      "mcore": [
+        "norm_epsilon",
+        "layernorm_epsilon"
+      ],
+      "required": true
+    },
+    {
+      "hf": "attention_dropout",
+      "mcore": [
+        "attention_dropout"
+      ],
+      "required": true
+    },
+    {
+      "hf": "scoring_func",
+      "mcore": [
+        "moe_router_score_function"
+      ],
+      "required": true
+    },
+    {
+      "hf": "routed_scaling_factor",
+      "mcore": [
+        "moe_router_topk_scaling_factor"
+      ],
+      "hf_default": 1.0,
+      "reverse_default": 1
+    },
+    {
+      "hf": "n_group",
+      "mcore": [
+        "moe_router_num_groups"
+      ],
+      "hf_default": null,
+      "reverse_default": 1
+    },
+    {
+      "hf": "topk_group",
+      "mcore": [
+        "moe_router_group_topk"
+      ],
+      "hf_default": null,
+      "reverse_default": 1
+    },
+    {
+      "hf": "swiglu_limit",
+      "mcore": [
+        "activation_func_clamp_value"
+      ],
+      "hf_default": null
+    },
+    {
+      "hf": "max_position_embeddings",
+      "mcore": [
+        "max_position_embeddings"
+      ],
+      "required": true
+    },
+    {
+      "hf": "rope_theta",
+      "mcore": [
+        "rotary_base"
+      ],
+      "required": true
+    },
+    {
+      "hf": "compress_rope_theta",
+      "mcore": [
+        "csa_compress_rotary_base"
+      ],
+      "required": true
+    }
+  ],
+  "mcore_values": {
+    "vocab_size": "$hf.vocab_size",
+    "padded_vocab_size": "$hf.vocab_size",
+    "actual_vocab_size": "$hf.vocab_size",
+    "moe_shared_expert_intermediate_size": {
+      "op": "mul",
+      "args": [
+        "$hf.n_shared_experts",
+        "$hf.moe_intermediate_size"
+      ]
+    },
+    "swiglu": true,
+    "gated_linear_unit": true,
+    "normalization": "RMSNorm",
+    "untie_embeddings_and_output_weights": {
+      "op": "not",
+      "args": [
+        "$hf.tie_word_embeddings"
+      ]
+    },
+    "multi_latent_attention": true,
+    "qk_layernorm": true,
+    "moe_layer_freq": 1,
+    "experimental_attention_variant": "dsv4_hybrid",
+    "enable_hyper_connections": true,
+    "rotary_percent": 1.0,
+    "rotary_interleaved": false,
+    "add_bias_linear": false,
+    "add_qkv_bias": false,
+    "position_embedding_type": "rope",
+    "qk_head_dim": {
+      "op": "sub",
+      "args": [
+        "$hf.head_dim",
+        "$hf.qk_rope_head_dim"
+      ]
+    },
+    "kv_lora_rank": {
+      "op": "sub",
+      "args": [
+        "$hf.head_dim",
+        "$hf.qk_rope_head_dim"
+      ]
+    },
+    "kv_channels": "$hf.head_dim"
+  }
+}

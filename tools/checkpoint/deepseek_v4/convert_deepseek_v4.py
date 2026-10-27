@@ -5,21 +5,20 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import sys
-import uuid
 import warnings
-from contextlib import contextmanager
 from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
+from tools.checkpoint.hf_mcore_dist.transaction import _staged_output
+
 from tools.checkpoint.deepseek_v4.config_mapping import without_mtp
 from tools.checkpoint.deepseek_v4.hf_config import (
     ConversionConfigurationError, derive_compress_ratios,
 )
-from tools.checkpoint.deepseek_v4.hf_io import SafetensorReader, parse_size, write_hf_checkpoint
+from tools.checkpoint.hf_mcore_dist.hf_io import SafetensorReader, parse_size, write_hf_checkpoint
 from tools.checkpoint.deepseek_v4 import MappingError
 from tools.checkpoint.deepseek_v4.mapping_plan import (
     load_mapping_plan, mcore_read_profile, prepare_mapping_plan, schemas_from_plan,
@@ -29,42 +28,13 @@ from tools.checkpoint.deepseek_v4.precision import (
     encode_hf_tensors, is_hf_mtp_key, output_config, resolve_precision,
 )
 from tools.checkpoint.deepseek_v4.registry import compile_profile
-from tools.checkpoint.deepseek_v4.quantized_archive import QuantizedArchive, save_quantized_archive
-from tools.checkpoint.deepseek_v4.streaming import (
-    StreamingCheckpointReader, _groups, _storage_dtype, hf_export_tensors, save_streaming_checkpoint,
+from tools.checkpoint.hf_mcore_dist.quantized_archive import QuantizedArchive, save_quantized_archive
+from tools.checkpoint.deepseek_v4.storage import (
+    StreamingCheckpointReader, hf_export_tensors, save_streaming_checkpoint,
 )
-from tools.checkpoint.deepseek_v4.world_one import require_world_one
+from tools.checkpoint.hf_mcore_dist.streaming import _groups, _storage_dtype
+from tools.checkpoint.hf_mcore_dist.world_one import require_world_one
 from tools.checkpoint.deepseek_v4.weight_schema import with_storage_dtypes
-
-
-@contextmanager
-def _staged_output(path, overwrite, inputs):
-    output = Path(path).expanduser().resolve()
-    for item in inputs:
-        source = Path(item).expanduser().resolve()
-        if source == output or source.is_relative_to(output) or output.is_relative_to(source):
-            raise ConversionConfigurationError(f"Output overlaps an input: {output} / {source}")
-    if output.exists() and (not output.is_dir() or (any(output.iterdir()) and not overwrite)):
-        raise ConversionConfigurationError(f"Output is not an empty directory: {output}; use --overwrite")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    stage = output.with_name(f".{output.name}.incomplete-{uuid.uuid4().hex}")
-    backup = output.with_name(f".{output.name}.backup-{uuid.uuid4().hex}")
-    stage.mkdir()
-    try:
-        yield stage
-        if output.exists():
-            output.rename(backup)
-        try:
-            stage.rename(output)
-        except OSError:
-            if backup.exists():
-                backup.rename(output)
-            raise
-        if backup.exists():
-            shutil.rmtree(backup)
-    finally:
-        if stage.exists():
-            shutil.rmtree(stage)
 
 
 def _plan(args, reference):
@@ -138,7 +108,7 @@ def _prepare_conversion(args, plan, to_mcore):
             for field in ("quantization_config", "scale_fmt", "scale_dtype", "expert_dtype"):
                 config.pop(field, None)
             config.update(reader.preserved_config)
-    archive = (QuantizedArchive(reader.directory, source)
+    archive = (QuantizedArchive(reader.directory, source, source_factory=PrecisionSource)
                if getattr(args, "restore_original_quantization", False) else None)
     storage_mode = (getattr(args, "conversion_mode", "dense") if to_mcore else
                     "preserve" if reader.preserved_specs else None)

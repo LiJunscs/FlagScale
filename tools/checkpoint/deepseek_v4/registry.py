@@ -10,7 +10,7 @@ experts prepend a global expert axis. No runtime GPTModel is instantiated.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from tools.checkpoint.hf_mcore_dist.plan import Piece, Profile
 from pathlib import Path
 
 from . import MappingError
@@ -21,15 +21,8 @@ from .precision import canonical_hf_name
 def load_rules(override=None, *, frozen=None):
     base = (json.loads(Path(__file__).with_name("modules.json").read_text(encoding="utf-8"))["rules"]
             if frozen is None else frozen)
-    if not isinstance(base, list) or not base:
-        raise MappingError("Mapping rules must be a nonempty list")
-    rules = {}
-    for rule in base:
-        if not isinstance(rule, dict) or not isinstance(rule.get("id"), str) or not rule["id"]:
-            raise MappingError("Mapping rule requires a nonempty id")
-        if rule["id"] in rules:
-            raise MappingError(f"Duplicate mapping rule: {rule['id']}")
-        rules[rule["id"]] = rule
+    from tools.checkpoint.hf_mcore_dist.mapping import merge_rules
+    patches = []
     if override:
         path = Path(override)
         if path.suffix.lower() in (".yaml", ".yml"):
@@ -37,16 +30,11 @@ def load_rules(override=None, *, frozen=None):
             payload = yaml.safe_load(path.read_text(encoding="utf-8"))
         else:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict) or set(payload) != {"schema_version", "profile", "rules"}:
-            raise MappingError("Override requires schema_version, profile and rules only")
-        if payload["schema_version"] != 1 or payload["profile"] != "deepseek_v4":
-            raise MappingError("Only the deepseek_v4 v1 override contract is supported")
-        seen = set()
-        for rule in payload["rules"]:
-            if rule["id"] in seen:
-                raise MappingError(f"Duplicate override rule: {rule['id']}")
-            seen.add(rule["id"])
-            rules[rule["id"]] = rule  # Replace the complete rule, never merge fields.
+        if (not isinstance(payload, dict) or set(payload) != {"schema_version", "profile", "rules"}
+                or payload["schema_version"] != 1 or payload["profile"] != "deepseek_v4"):
+            raise MappingError("Expected deepseek_v4 v1 mapping overrides")
+        patches = payload["rules"]
+    rules = {rule["id"]: rule for rule in merge_rules(base, patches)}
     arities = {"identity": (1, 1), "swiglu": (2, 1), "expert": (1, 1),
                "expert_swiglu": (2, 1), "hc_scale": (1, 3)}
     for rule in rules.values():
@@ -74,34 +62,6 @@ def load_rules(override=None, *, frozen=None):
             if "{" in name.replace("{expert}", "") or "}" in name.replace("{expert}", ""):
                 raise MappingError("Only the {expert} placeholder is supported")
     return list(rules.values())
-
-
-@dataclass(frozen=True)
-class Piece:
-    hf: str
-    runtime_key: str
-    key: str
-    shape: tuple[int, ...]
-    offset: tuple[int, ...]
-    global_shape: tuple[int, ...]
-    hf_index: int | None = None
-    extra_key: str | None = None
-
-
-@dataclass
-class Profile:
-    pieces: list[Piece]
-    shapes: dict[str, tuple[int, ...]]
-
-    @property
-    def keys(self):
-        return {piece.key for piece in self.pieces}
-
-    def report(self):
-        return {"profile": "deepseek_v4", "revision": "dsv4-global-v1",
-                "physical_contract": {"non_homogeneous_layers": True,
-                                      "singleton_local_shards": False},
-                "pieces": [asdict(piece) for piece in self.pieces]}
 
 
 def _expected_shapes(rule_id, config, ratio):
@@ -224,7 +184,6 @@ def compile_profile(source, config, ratios, override=None, *, rules=None):
                                     tuple(global_shape), extra_key=extra_key))
     if consumed != source.keys:
         raise MappingError(f"Unmapped HF DSv4 tensors: {sorted(source.keys - consumed)[:20]}")
-    return Profile(pieces, shapes)
-
+    return Profile(pieces, shapes, "deepseek_v4", "dsv4-global-v1")
 
 

@@ -14,7 +14,7 @@ from pathlib import Path
 import torch
 
 from .hf_io import RawTensor, SafetensorReader, ShardedSafetensorWriter
-from .precision import DENSE_DTYPES, SCALE_SUFFIXES, PrecisionError, PrecisionSource
+from .quantization import DENSE_DTYPES, SCALE_SUFFIXES, PrecisionError, PrecisionSource
 
 
 ARCHIVE_DIRECTORY = "hf_quantized"
@@ -41,7 +41,7 @@ def save_quantized_archive(source, config, iteration_dir, max_shard_size):
             writer.add(name, RawTensor(source.reader, name))
             size += source.reader.tensor_storage(name)[2]
     writer.finish()
-    manifest = {"schema_version": 2, "kind": "dsv4_original_quantized_payloads",
+    manifest = {"schema_version": 2, "kind": "hf_original_quantized_payloads",
                 "model_dtype": model_dtype, "hf_config": config, "specs": specs}
     (directory / "manifest.json").write_text(
         json.dumps(manifest, indent=2, allow_nan=False) + "\n", encoding="utf-8")
@@ -50,7 +50,7 @@ def save_quantized_archive(source, config, iteration_dir, max_shard_size):
 
 
 class QuantizedArchive:
-    def __init__(self, iteration_dir, target_source):
+    def __init__(self, iteration_dir, target_source, *, source_factory=PrecisionSource):
         directory = Path(iteration_dir) / ARCHIVE_DIRECTORY
         manifest_path = directory / "manifest.json"
         if not manifest_path.is_file():
@@ -67,11 +67,11 @@ class QuantizedArchive:
 
         manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"), object_pairs_hook=unique)
         if (not isinstance(manifest, dict) or manifest.get("schema_version") != 2
-                or manifest.get("kind") != "dsv4_original_quantized_payloads"
+                or manifest.get("kind") != "hf_original_quantized_payloads"
                 or manifest.get("model_dtype") not in DENSE_DTYPES):
             raise PrecisionError("Unsupported original HF quantization archive")
         self.config = manifest["hf_config"]
-        self.source = PrecisionSource(SafetensorReader(directory), self.config,
+        self.source = source_factory(SafetensorReader(directory), self.config,
                                       dtype=DENSE_DTYPES[manifest["model_dtype"]], device="cpu")
         expected = _specs(self.source)
         if (not expected or manifest.get("specs") != expected
