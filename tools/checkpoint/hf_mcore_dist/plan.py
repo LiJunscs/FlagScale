@@ -1,7 +1,7 @@
 # Copyright 2026 FlagOS Contributors
 # Licensed under the Apache License, Version 2.0.
 """Generated tensor regions; no per-model shape inventory."""
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 @dataclass(frozen=True)
 class Piece:
@@ -13,6 +13,9 @@ class Piece:
     global_shape: tuple[int, ...]
     hf_index: int | None = None
     extra_key: str | None = None
+    source_offset: tuple[int, ...] | None = None
+    source_shape: tuple[int, ...] | None = None
+    axes: tuple[int, ...] | None = None
 
 @dataclass
 class Profile:
@@ -21,6 +24,8 @@ class Profile:
 
     name: str = "mapping"
     revision: str = "hf-mcore-v1"
+    extra_keys: tuple[str, ...] = ()
+    physical_shapes: dict[str, tuple[int, ...]] = field(default_factory=dict)
 
     @property
     def keys(self):

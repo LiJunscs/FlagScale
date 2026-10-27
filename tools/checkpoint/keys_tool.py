@@ -1,6 +1,6 @@
 # Copyright 2026 FlagOS Contributors
 # Licensed under the Apache License, Version 2.0.
-"""Inspect existing DSv4 configs and checkpoint keys; never construct a model."""
+"""Inspect checkpoint configs and keys; never construct a model."""
 from __future__ import annotations
 
 import argparse
@@ -13,7 +13,6 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools.checkpoint.hf_mcore_dist.world_one import require_world_one
-import transformers
 
 
 def _write_json(path, payload):
@@ -28,7 +27,7 @@ def _reader_inventory(reader):
     return {name: {"shape": list(shapes[name]), "dtype": dtypes[name]} for name in sorted(reader.keys)}
 
 def probe_weights(args):
-    """Inspect an existing DSv4 export without importing or constructing models."""
+    """Inspect an existing HF export without importing or constructing models."""
     require_world_one()
     from tools.checkpoint.hf_mcore_dist.safetensors_index import read_safetensors_index
     from tools.checkpoint.hf_mcore_dist.safetensors_metadata import SafetensorMetadataReader
@@ -38,12 +37,10 @@ def probe_weights(args):
     config = json.loads(config_path.read_text(encoding="utf-8-sig"))
     if not isinstance(config, dict):
         raise ValueError("config.json must be a JSON object")
-    if config.get("model_type") != "deepseek_v4":
-        raise ValueError("This MVP inventories DeepSeek-V4 only")
     index_only = getattr(args, "index_only", False)
     index_path = directory / "model.safetensors.index.json"
-    index = read_safetensors_index(index_path)
     if index_only:
+        index = read_safetensors_index(index_path)
         weights = dict(sorted(index["weight_map"].items()))
         index_metadata = index.get("metadata")
         serialized = {name: {"shape": None, "dtype": None} for name in weights}
@@ -57,11 +54,11 @@ def probe_weights(args):
         if entry["dtype"] is not None:
             dtype_counts[entry["dtype"]] += 1
     payload = {
-        "schema_version": 1, "profile": "deepseek_v4", "kind": "existing_export_inventory",
+        "schema_version": 1, "profile": config.get("model_type"), "kind": "existing_export_inventory",
         "source_type": "weights_directory", "source_directory": str(directory),
         "inspection_mode": "index_only" if index_only else "headers",
         "config_path": str(config_path), "config": config,
-        "profile_validation": "model_type=deepseek_v4 in config; mapping compatibility not validated",
+        "profile_validation": "model semantics not validated",
         "source_index": str(index_path) if index_path is not None else None,
         "transformers_version": None,
         "config_transformers_version": config.get("transformers_version"),
@@ -73,15 +70,15 @@ def probe_weights(args):
         "precision_validation": "Not performed; storage metadata and config do not validate quantization semantics",
     }
     _write_json(args.output, payload)
-    print(f"Recorded {len(weights)} DSv4 keys from {payload['inspection_mode']}: {Path(args.output).resolve()}")
+    print(f"Recorded {len(weights)} keys from {payload['inspection_mode']}: {Path(args.output).resolve()}")
 
 
 def diff(args):
     previous = json.loads(Path(args.previous).read_text(encoding="utf-8"))
     current = json.loads(Path(args.current).read_text(encoding="utf-8"))
     for snapshot in (previous, current):
-        if snapshot.get("schema_version") != 1 or snapshot.get("profile") != "deepseek_v4":
-            raise ValueError("Only DSv4 v1 key snapshots can be compared")
+        if snapshot.get("schema_version") != 1 or snapshot.get("kind") != "existing_export_inventory":
+            raise ValueError("Only v1 HF key snapshots can be compared")
     before, after = previous["serialized_keys"], current["serialized_keys"]
     changed = {}
     compared = {"shape": 0, "dtype": 0}
@@ -112,15 +109,23 @@ def diff(args):
 def probe_mcore(args):
     from tools.checkpoint.hf_mcore_dist.artifacts import read_mcore_artifacts
     _write_json(args.output, {"schema_version": 2, "kind": "mcore_config_inventory",
-                              "profile": "deepseek_v4", **read_mcore_artifacts(args.mcore_path)})
+                              **read_mcore_artifacts(args.mcore_path)})
 
 
 def mapping(args):
-    from tools.checkpoint.deepseek_v4.mapping_plan import prepare_mapping_plan
-    payload = prepare_mapping_plan(args.hf_model, args.mcore_path, args.mapping_override,
-                                   hf_headers=args.hf_headers)
+    from tools.checkpoint.hf_mcore_dist.convert import build_parser, prepare
+    command = "mcore-to-hf" if args.mcore_path else "hf-to-mcore"
+    source = args.mcore_path or args.hf_model
+    if not source:
+        raise ValueError("Provide --hf-model or --mcore-path")
+    argv = [command, "--source", source, "--output", args.output, "--mapping", args.mapping]
+    if args.mcore_path and args.hf_model:
+        argv += ["--hf-reference", args.hf_model]
+    for override in args.mapping_override:
+        argv += ["--mapping-override", override]
+    payload = prepare(build_parser().parse_args(argv)).report
     _write_json(args.output, payload)
-    print(f"Prepared {payload['mode']} model-only mapping: {Path(args.output).resolve()}")
+    print(f"Prepared {command} mapping: {Path(args.output).resolve()}")
 
 
 def main(argv=None):
@@ -136,10 +141,10 @@ def main(argv=None):
     mcore.add_argument("--output", required=True)
     mcore.set_defaults(handler=probe_mcore)
     mapping_parser = commands.add_parser("mapping", allow_abbrev=False)
-    mapping_parser.add_argument("--hf-model", required=True)
+    mapping_parser.add_argument("--hf-model")
+    mapping_parser.add_argument("--mapping", required=True)
     mapping_parser.add_argument("--mcore-path", help="Actual MCore source for export; omit for HF-to-MCore model import")
-    mapping_parser.add_argument("--hf-headers", action="store_true", help="Also inspect existing storage dtypes/scales")
-    mapping_parser.add_argument("--mapping-override")
+    mapping_parser.add_argument("--mapping-override", action="append", default=[])
     mapping_parser.add_argument("--output", required=True)
     mapping_parser.set_defaults(handler=mapping)
     compare = commands.add_parser("diff", allow_abbrev=False)

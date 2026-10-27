@@ -61,6 +61,12 @@ def record(rows, hf, mc, op, before, after):
                  "template_value": deepcopy(before), "source_value": deepcopy(after)})
 
 
+def _exactdiv(a, b):
+    if not b or a % b:
+        raise MappingError("Config division must be exact with a nonzero divisor")
+    return a // b
+
+
 def resolve(value, configs):
     if isinstance(value, str) and value.startswith("$"):
         result = get_field(configs, value[1:], _MISSING)
@@ -74,7 +80,7 @@ def resolve(value, configs):
             args = [resolve(item, configs) for item in value["args"]]
             operations = {"add": operator.add, "sub": operator.sub, "mul": operator.mul,
                           "div": operator.truediv, "floordiv": operator.floordiv,
-                          "not": operator.not_, "int": int}
+                          "not": operator.not_, "int": int, "exactdiv": _exactdiv}
             if value["op"] not in operations:
                 raise MappingError(f"Unknown config operation: {value['op']}")
             try:
