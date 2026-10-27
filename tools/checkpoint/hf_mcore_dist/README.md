@@ -6,9 +6,9 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `mapping.py`、`mapping.yaml` | 小型映射表、继承、覆盖、名称模板展开及常见 dense decoder 预设 |
+| `mapping.py`、`mapping.yaml` | 公共 dense/MLA/MoE 权重表、继承、覆盖与名称模板展开 |
 | `operators.py`、`engine.py`、`regions.py` | 双向布局操作、metadata 预检查及 HF fragment ↔ DCP 区域编译 |
-| `config.py` | 公共参数转换：字段别名、嵌套字段、默认值、简单派生表达式 |
+| `config.py`、`parameters.yaml` | 公共参数转换执行及可持续扩展的字段对应字典 |
 | `precision.py`、`quantization.py`、`codecs.py` | 精度描述、FP8/MXFP4 识别与软件解码、导出编码及精度策略 |
 | `fp8_native.py`、`quantized_archive.py` | 原生 TE 存储及原编码归档/验证恢复 |
 | `hf_io.py`、`safetensors_*.py`、`artifacts.py` | HF / MCore 元数据和存储读写 |
@@ -16,7 +16,22 @@
 | `transaction.py`、`world_one.py` | 输出提交保护和单进程执行边界 |
 | `convert.py` | 统一入口 |
 
-`../qwen3/mapping.yaml` 仅声明 Q/K norm 和参数差异。`../deepseek_v4/` 的运行时代码只保留 `adapter.py`：压缩布局/YaRN 配置规范化，以及关闭 router bias 时的生成/零值排除约定；权重映射与参数转换分别由 `mapping.yaml`、`parameters.yaml` 声明。DSv4 不再有独立 CLI、规划器、预期 shape 表或模型语义校验。配置覆盖后，所有模型使用同一个区域编译器和读写流程。
+配置继承关系为：
+
+```text
+hf_mcore_dist/parameters.yaml    公共参数名/别名字典，不设置模型默认值
+             ↓
+hf_mcore_dist/mapping.yaml       公共命名、dense/MLA/MoE 权重规则及基础布局约定
+             ↓
+qwen3/mapping.yaml               Qwen3 的 norm 存在性及配置差异
+或 deepseek_v4/mapping.yaml      DSv4 的新增模块、命名/布局覆盖、参数语义与默认值差异
+```
+
+DSv4 不再维护独立的 `parameters.yaml`。常见参数、MLA 投影、路由器、专家和共享专家映射集中在公共表中。模型文件只保存差异；相同规则通过继承复用，不复制完整表。公共表中的可选模块不存在时，连对应的 `collect`/`params` 配置也不会读取，因此 dense 模型不需要提供 MoE 参数。
+
+`deepseek_v4/adapter.py` 只负责压缩布局/YaRN 规范化和关闭 router bias 时的约定，不构造另一条转换流程。
+
+新增模型参数的维护规则：无歧义的 HF↔MCore 字段对应加入公共 `parameters.yaml`，源字段不存在时跳过；模型特有默认值、派生值和不同语义留在模型覆盖中。例如公共 `head_dim → kv_channels`，DSv4 覆盖为 `head_dim → v_head_dim`；DSv4 的 `sliding_window → csa_window_size` 也留在模型文件。公共字典的增长不应隐式启用新模块或注入其他模型的默认值。
 
 既有未追踪的 DSv4 文档和加载示例未修改，其旧导入路径不再适用于本版；本文件描述当前入口。
 
@@ -68,21 +83,22 @@ schema_version: 1
 extends: /path/to/base/mapping.yaml
 rules:
   - id: fc1
-    hf: ['model.layers.{layer}.mlp.up_proj.weight', 'model.layers.{layer}.mlp.gate_proj.weight']
-    mcore: ['decoder.layers.{layer}.mlp.linear_fc1.weight']
+    scope: layer
+    hf: [ffn.w3.weight, ffn.w1.weight]
+    mcore: [mlp.linear_fc1.weight]
     op: swiglu
-    extra_state: ['decoder.layers.{layer}.mlp.linear_fc1._extra_state/shard_0_1']
+    extra_state: [mlp.linear_fc1._extra_state/shard_0_1]
   - id: output
     disabled: true
   - id: additional_buffer
     hf: [custom.buffer]
     mcore: [custom.buffer]
 ignore:
-  hf: [lm_head.weight]
+  hf: [head.weight]
   mcore: [output_layer.weight]
 ```
 
-这里刻意把顺序写成 `[up, gate]`。即使实际模型期望相反顺序，只要尺寸合法就按配置执行。未映射源 tensor 默认报错；删除规则不等于自动忽略其权重，忽略必须明确声明。`optional: true` 允许整条规则没有源匹配，但不容忍匹配组内缺少部分输入。
+继承公共表时，`hf` 和 `ignore.hf` 使用命名规范化后的名字；没有继承时默认使用原始名字。上例中的 `w3/w1` 对应 up/gate，刻意按 `[up, gate]` 排列。即使实际模型期望相反顺序，只要尺寸合法就按配置执行。未映射源 tensor 默认报错；删除规则不等于自动忽略其权重，忽略必须明确声明。`optional: true` 允许整条规则没有源匹配，但不容忍匹配组内缺少部分输入。
 
 `{layer}` 等数字占位符从真实源 key 枚举，不维护层数对应的完整 key 表。`scopes` 可给同一组规则添加 decoder/MTP 等不同前缀；可选 scope 没有匹配时跳过。堆叠专家等多对一映射可指定 `collect: {expert: $hf.num_experts}`；专家按编号展开，同一专家内部保留 `hf` 列表顺序。需要 TE extra-state 时在规则中声明其全局存储 key；核心不会从模块名称猜测。extra-state 模板中的 `{expert_count}` 由 `collect.expert` 自动提供。
 
@@ -107,7 +123,7 @@ MXFP4 必须显式标识，不能把任意 U8/I8 buffer 当量化权重：
 
 ```yaml
 quantization:
-  mxfp4: ['model.layers.*.mlp.experts.*.weight']
+  mxfp4: ['layers.*.ffn.experts.*.weight']
 ```
 
 ### 显式例外
