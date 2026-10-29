@@ -1,21 +1,11 @@
 # Copyright 2026 FlagOS Contributors
 # Licensed under the Apache License, Version 2.0.
 """Shared config aliases, nested fields, defaults and small explicit expressions."""
-from copy import deepcopy
 import operator
+from copy import deepcopy
 
-from . import MappingError
+from .. import MappingError
 
-MCORE_OUTPUT_OVERRIDES = dict(
-    tensor_model_parallel_size=1, pipeline_model_parallel_size=1,
-    expert_model_parallel_size=1, expert_tensor_parallel_size=1, context_parallel_size=1,
-    virtual_pipeline_model_parallel_size=None, world_size=1, data_parallel_size=1,
-    rank=0, local_rank=0, sequence_parallel=False,
-    no_save_optim=True, no_save_rng=True,
-    iteration=0, ckpt_format="torch_dist", use_dist_ckpt=True, use_distributed_optimizer=False,
-    fp8=None, fp4=None, fp8_param_gather=False, fp4_param_gather=False,
-    fp8_param=False, fp4_param=False,
-)
 _MISSING = object()
 
 
@@ -56,11 +46,6 @@ def set_alias(values, aliases, value):
             set_field(values, key, value)
 
 
-def record(rows, hf, mc, op, before, after):
-    rows.append({"hf": hf, "mcore": list(mc), "operation": op,
-                 "template_value": deepcopy(before), "source_value": deepcopy(after)})
-
-
 def _exactdiv(a, b):
     if not b or a % b:
         raise MappingError("Config division must be exact with a nonzero divisor")
@@ -91,12 +76,11 @@ def resolve(value, configs):
     return value
 
 
-def translate_fields(fields, source, forward, template=None):
-    """Translate declared aliases/defaults; preserve field-level provenance."""
-    target, rows = deepcopy(template or {}), []
+def translate_fields(fields, source, forward):
+    """Translate declared aliases and defaults."""
+    target = {}
     for field in fields:
         hf, aliases = field["hf"], field["mcore"]
-        op = "copy"
         if forward:
             value = get_field(source, hf, _MISSING)
             if value is _MISSING:
@@ -104,21 +88,18 @@ def translate_fields(fields, source, forward, template=None):
                     raise MappingError(f"Missing required config field: {hf}")
                 if "hf_default" not in field:
                     continue
-                value, op = field["hf_default"], "fixed_profile_default"
+                value = field["hf_default"]
         else:
             value = get_alias(source, aliases, required=field.get("required", False))
             if value is None and "reverse_default" in field:
                 value = field["reverse_default"]
-            elif value is None and field.get("normalize") != "int_or_zero":
-                op = "nullable"
         if field.get("normalize") == "int_or_zero":
             value = int(value or 0)
         if forward:
             set_alias(target, aliases, value)
         elif value is not None or get_field(target, hf, _MISSING) is not _MISSING:
             set_field(target, hf, value)
-        record(rows, hf, aliases, op, get_field(template or {}, hf), value)
-    return target, rows
+    return target
 
 
 def translate_config(mapping, source, forward):
@@ -131,7 +112,7 @@ def translate_config(mapping, source, forward):
         if not isinstance(aliases, list) or not aliases or any(not isinstance(x, str) for x in aliases):
             raise MappingError(f"Invalid config aliases: {hf}")
         fields.append({**spec, "hf": hf, "mcore": aliases})
-    target, _ = translate_fields(fields, source, forward)
+    target = translate_fields(fields, source, forward)
     context = {"hf": source if forward else target, "mcore": target if forward else source}
     for key, value in mapping.get("mcore_args" if forward else "hf_config", {}).items():
         set_field(target, key, resolve(value, context))

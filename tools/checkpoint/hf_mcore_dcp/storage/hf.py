@@ -11,43 +11,14 @@ import shutil
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 import torch
 
-from tools.checkpoint.hf_mcore_dcp.safetensors_metadata import (
-    HuggingFaceIOError,
-    SafetensorMetadataReader,
-)
-
-
-def parse_size(value: str) -> int:
-    units = {"B": 1, "KB": 1000, "MB": 1000**2, "GB": 1000**3, "TB": 1000**4}
-    normalized = value.strip().upper()
-    for unit in sorted(units, key=len, reverse=True):
-        if normalized.endswith(unit):
-            number = normalized[: -len(unit)].strip()
-            return int(float(number) * units[unit])
-    return int(normalized)
+from ..utils import parse_size
+from .metadata import HuggingFaceIOError, SafetensorMetadataReader
 
 
 class SafetensorReader(SafetensorMetadataReader):
-
-    def iter_tensor_bytes(self, name: str, chunk_size: int = 8 * 1024**2):
-        """Copy validated storage in bounded chunks, without interpreting its dtype."""
-        if chunk_size <= 0:
-            raise HuggingFaceIOError("chunk_size must be positive")
-        begin, end = self._metadata[name]["data_offsets"]
-        filename = self._weight_map[name]
-        with (self.model_dir / filename).open("rb") as stream:
-            stream.seek(self._data_starts[filename] + begin)
-            remaining = end - begin
-            while remaining:
-                payload = stream.read(min(remaining, chunk_size))
-                if not payload:
-                    raise HuggingFaceIOError(f"Truncated tensor: {name}")
-                remaining -= len(payload)
-                yield payload
 
     def get_bytes(self, name: str) -> torch.Tensor:
         """Read one-byte storage (FP8, packed FP4 or E8M0), without a dtype cast."""
@@ -70,8 +41,7 @@ class SafetensorReader(SafetensorMetadataReader):
         dense = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32,
                  "I32": torch.int32, "I64": torch.int64, "I8": torch.int8, "U8": torch.uint8}
         if entry["dtype"] in dense:
-            # A shard may contain E8M0 alongside BF16. Older safetensors rejects
-            # that entire header even when the requested tensor is ordinary BF16.
+            # Read dense values directly; quantized payloads/scales use get_bytes.
             dtype = dense[entry["dtype"]]
             begin, end = entry["data_offsets"]
             sizes = {"BF16": 2, "F16": 2, "F32": 4, "I32": 4, "I64": 8, "I8": 1, "U8": 1}
@@ -86,15 +56,7 @@ class SafetensorReader(SafetensorMetadataReader):
             if len(payload) != end - begin:
                 raise HuggingFaceIOError(f"Truncated tensor: {name}")
             return torch.frombuffer(payload, dtype=dtype).reshape(entry["shape"])
-        try:
-            from safetensors import safe_open
-        except ImportError as error:
-            raise HuggingFaceIOError(
-                "safetensors is required for HF conversion"
-            ) from error
-        path = self.model_dir / self._weight_map[name]
-        with safe_open(path, framework="pt", device="cpu") as handle:
-            return handle.get_tensor(name)
+        raise HuggingFaceIOError(f"Expected a dense tensor, got {entry['dtype']}: {name}")
 
 
 def copy_hf_assets(reference_dir: str | Path, output_dir: str | Path) -> None:
@@ -102,20 +64,12 @@ def copy_hf_assets(reference_dir: str | Path, output_dir: str | Path) -> None:
     target = Path(output_dir).expanduser().resolve()
     target.mkdir(parents=True, exist_ok=True)
     for item in source.iterdir():
-        if item.name.startswith(".") or item.is_dir() or item.suffix in {
+        if item.name == "conversion_report.json" or item.name.startswith(".") or item.is_dir() or item.suffix in {
             ".safetensors", ".bin", ".pt", ".pth"
         } or item.name.endswith(".index.json"):
             continue
         destination = target / item.name
         shutil.copy2(item, destination)
-
-
-@dataclass(frozen=True)
-class RawTensor:
-    """A physical tensor payload to copy verbatim, including native scale bytes."""
-
-    reader: SafetensorReader
-    name: str
 
 
 @dataclass(frozen=True)
@@ -132,44 +86,6 @@ class RawEncoded:
     dtype_code: str
 
 
-@dataclass(frozen=True)
-class NativeQuantizedWeight:
-    """A quantized weight read straight from native (DCP) storage.
-
-    `data` holds the packed payload bytes (uint8, e.g. FP8 E4M3) and
-    `scale_inv` the FP32 dequantization scales; `kind` records the
-    quantization family so downstream encoding can choose the layout.
-    """
-
-    kind: str
-    data: torch.Tensor
-    scale_inv: torch.Tensor
-
-    @property
-    def shape(self):
-        return tuple(self.data.shape)
-
-    @property
-    def ndim(self):
-        return self.data.ndim
-
-
-@dataclass(frozen=True)
-class PreservedQuantizedWeight:
-    """Original quantized codewords/scales, read without dequantizing DCP."""
-
-    kind: str
-    data: torch.Tensor
-    scale: torch.Tensor
-    data_dtype: str
-    scale_dtype: str
-    shape: tuple[int, ...]
-
-    @property
-    def ndim(self):
-        return len(self.shape)
-
-
 class ShardedSafetensorWriter:
     def __init__(self, output_dir: str | Path, max_shard_size: int | str = "10GB"):
         self.output_dir = Path(output_dir).expanduser().resolve()
@@ -181,26 +97,24 @@ class ShardedSafetensorWriter:
         )
         if self.max_shard_size <= 0:
             raise HuggingFaceIOError("max_shard_size must be positive")
-        self._current: dict[str, torch.Tensor | RawTensor] = {}
+        self._current: dict[str, torch.Tensor | RawEncoded] = {}
         self._current_size = 0
         self._temporary_files: list[Path] = []
         self._temporary_weight_map: dict[str, Path] = {}
         self._total_size = 0
 
     @staticmethod
-    def _tensor_size(tensor: torch.Tensor | RawTensor | RawEncoded) -> int:
-        if isinstance(tensor, RawTensor):
-            return tensor.reader.tensor_storage(tensor.name)[2]
+    def _tensor_size(tensor: torch.Tensor | RawEncoded) -> int:
         if isinstance(tensor, RawEncoded):
             return tensor.tensor.numel()
         return tensor.numel() * tensor.element_size()
 
-    def add(self, name: str, tensor: torch.Tensor | RawTensor | RawEncoded) -> None:
+    def add(self, name: str, tensor: torch.Tensor | RawEncoded) -> None:
         if name in self._temporary_weight_map or name in self._current:
             raise HuggingFaceIOError(f"Duplicate HF output tensor: {name}")
         # Own storage: expert gate/up and grouped projections can share a source
         # allocation, which safetensors.save_file otherwise rejects as aliases.
-        if not isinstance(tensor, (RawTensor, RawEncoded)):
+        if not isinstance(tensor, RawEncoded):
             tensor = tensor.detach().to("cpu").contiguous().clone()
         tensor_size = self._tensor_size(tensor)
         if self._current and self._current_size + tensor_size > self.max_shard_size:
@@ -216,7 +130,7 @@ class ShardedSafetensorWriter:
             self.output_dir
             / f"model-part-{len(self._temporary_files) + 1:05d}.safetensors"
         )
-        if any(isinstance(tensor, (RawTensor, RawEncoded)) for tensor in self._current.values()):
+        if any(isinstance(tensor, RawEncoded) for tensor in self._current.values()):
             self._write_raw_shard(temporary_path)
         else:
             try:
@@ -242,8 +156,6 @@ class ShardedSafetensorWriter:
                     raise HuggingFaceIOError(
                         f"RawEncoded payload must be uint8 bytes: {name}: {tensor.tensor.dtype}")
                 code, shape, size = tensor.dtype_code, tuple(tensor.tensor.shape), tensor.tensor.numel()
-            elif isinstance(tensor, RawTensor):
-                code, shape, size = tensor.reader.tensor_storage(tensor.name)
             else:
                 if tensor.dtype not in codes:
                     raise HuggingFaceIOError(f"Unsupported dense dtype in raw shard: {name}: {tensor.dtype}")
@@ -260,9 +172,6 @@ class ShardedSafetensorWriter:
                     data = tensor.tensor.reshape(-1)
                     for start in range(0, data.numel(), 8 * 1024**2):
                         stream.write(data[start:start + 8 * 1024**2].numpy().tobytes())
-                elif isinstance(tensor, RawTensor):
-                    for payload in tensor.reader.iter_tensor_bytes(tensor.name):
-                        stream.write(payload)
                 else:
                     data = tensor.reshape(-1).view(torch.uint8)
                     for start in range(0, data.numel(), 8 * 1024**2):
@@ -293,22 +202,3 @@ class ShardedSafetensorWriter:
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
         return index_path
-
-
-def write_hf_checkpoint(
-    tensors: Iterable[tuple[str, torch.Tensor | RawTensor]],
-    reference_dir: str | Path,
-    output_dir: str | Path,
-    max_shard_size: int | str,
-    *,
-    output_config: dict | None = None,
-) -> Path:
-    copy_hf_assets(reference_dir, output_dir)
-    writer = ShardedSafetensorWriter(output_dir, max_shard_size)
-    for name, tensor in tensors:
-        writer.add(name, tensor)
-    if output_config is not None:
-        (Path(output_dir) / "config.json").write_text(
-            json.dumps(output_config, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
-    return writer.finish()

@@ -1,6 +1,8 @@
 # Copyright 2026 FlagOS Contributors
 # Licensed under the Apache License, Version 2.0.
-"""CPU/CUDA software E4M3 and MXFP4 codecs; independent of model names."""
+
+"""FP32 software decoding of HF E4M3 and MXFP4 weights, independent of training."""
+
 import torch
 
 FP4_VALUES = (
@@ -21,7 +23,6 @@ FP4_VALUES = (
     -4.0,
     -6.0,
 )
-BYTE_SCALES = {"U8", "F8_E8M0", "F8_E8M0FNU"}
 
 
 def e4m3_values():
@@ -42,7 +43,7 @@ def decode_quantized_matrix(payload, scale, kind, shape, dtype, *, device="cpu")
 
     The caller validates the physical layout and supplies positive FP32 scales:
     FP8 uses 128x128 blocks; MXFP4 packs the low nibble first in groups of 32.
-    Conversion and checkpoint loading share this hardware-independent codec.
+    Only the converter decodes these encodings; output checkpoints contain ordinary tensors.
     """
     if kind not in {"fp8", "mxfp4"}:
         raise ValueError(f"Unsupported quantized matrix encoding: {kind}")
