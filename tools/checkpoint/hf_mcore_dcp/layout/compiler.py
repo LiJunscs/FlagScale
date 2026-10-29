@@ -1,6 +1,7 @@
 # Copyright 2026 FlagOS Contributors
 # Licensed under the Apache License, Version 2.0.
 """Compile declarative layouts into tensor nodes and global checkpoint regions."""
+
 from __future__ import annotations
 
 import fnmatch
@@ -27,6 +28,7 @@ class Piece:
     source_shape: tuple[int, ...] | None = None
     axes: tuple[int, ...] | None = None
 
+
 @dataclass
 class Profile:
     pieces: list[Piece]
@@ -38,10 +40,12 @@ class Profile:
     physical_shapes: dict[str, tuple[int, ...]] = field(default_factory=dict)
 
     def report(self):
-        return {"profile": self.name, "revision": self.revision,
-                "physical_contract": {"non_homogeneous_layers": True,
-                                      "singleton_local_shards": False},
-                "pieces": [asdict(piece) for piece in self.pieces]}
+        return {
+            "profile": self.name,
+            "revision": self.revision,
+            "physical_contract": {"non_homogeneous_layers": True, "singleton_local_shards": False},
+            "pieces": [asdict(piece) for piece in self.pieces],
+        }
 
 
 STORAGE_DTYPES = {**HEADER_DTYPES, "I32": torch.int32, "I64": torch.int64}
@@ -50,8 +54,10 @@ DTYPE_CODES = {str(value): key for key, value in STORAGE_DTYPES.items()}
 
 def converted_dtype(code, requested):
     if code not in STORAGE_DTYPES:
-        raise MappingError(f"Table mappings currently require dense storage, got {code}; "
-                           "decode the source encoding before applying tensor layouts")
+        raise MappingError(
+            f"Table mappings currently require dense storage, got {code}; "
+            "decode the source encoding before applying tensor layouts"
+        )
     if requested == "auto" or code in ("F32", "I32", "I64"):
         return code
     return DTYPE_CODES[str(DENSE_DTYPES[requested])]
@@ -62,9 +68,17 @@ def compile_mapping(mapping, specs, configs, *, forward, dtype="auto"):
     patterns = mapping.get("ignore", {}).get(source_side, [])
     if not isinstance(patterns, list) or any(not isinstance(p, str) for p in patterns):
         raise MappingError("ignore.hf / ignore.mcore must be lists of glob patterns")
-    zero_checks = [name for name in specs if any(fnmatch.fnmatchcase(name, p)
-                   for p in mapping.get("zero_checks", {}).get(source_side, []))]
-    ignored = {name for name in specs if any(fnmatch.fnmatchcase(name, p) for p in patterns)} | set(zero_checks)
+    zero_checks = [
+        name
+        for name in specs
+        if any(
+            fnmatch.fnmatchcase(name, p)
+            for p in mapping.get("zero_checks", {}).get(source_side, [])
+        )
+    ]
+    ignored = {name for name in specs if any(fnmatch.fnmatchcase(name, p) for p in patterns)} | set(
+        zero_checks
+    )
     available = specs.keys() - ignored
     nodes, outputs, used, shape_fields = [], {}, set(), {}
     for row in expand_rules(mapping, available, configs, forward):
@@ -75,8 +89,10 @@ def compile_mapping(mapping, specs, configs, *, forward, dtype="auto"):
                 continue
             if names:
                 raise MappingError("Generated tensors must not declare source names")
-            result = [torch.empty(spec["shape"], device="meta", dtype=STORAGE_DTYPES[spec["dtype"]])
-                      for _ in targets]
+            result = [
+                torch.empty(spec["shape"], device="meta", dtype=STORAGE_DTYPES[spec["dtype"]])
+                for _ in targets
+            ]
             codes = []
         else:
             result = None
@@ -85,9 +101,10 @@ def compile_mapping(mapping, specs, configs, *, forward, dtype="auto"):
             raise MappingError(f"Rule {row['id']} has missing inputs: {sorted(missing)}")
         if result is None:
             codes = [converted_dtype(specs[name].dtype, dtype) for name in names]
-            inputs = [torch.empty(specs[name].shape, device="meta",
-                                  dtype=STORAGE_DTYPES[code])
-                      for name, code in zip(names, codes)]
+            inputs = [
+                torch.empty(specs[name].shape, device="meta", dtype=STORAGE_DTYPES[code])
+                for name, code in zip(names, codes)
+            ]
             result = transform(inputs, row.get("op", "identity"), row["params"], forward)
         if row.get("export_slice") and not forward:
             if row.get("op", "identity") != "identity":
@@ -97,37 +114,63 @@ def compile_mapping(mapping, specs, configs, *, forward, dtype="auto"):
                 raise MappingError("Invalid export_slice size")
             result = [result[0].narrow(axis, 0, size)]
         if len(result) != len(targets):
-            raise MappingError(f"Rule {row['id']} produces {len(result)} tensors for {len(targets)} targets")
+            raise MappingError(
+                f"Rule {row['id']} produces {len(result)} tensors for {len(targets)} targets"
+            )
         extras = row.get("extra_state", [])
         if not isinstance(extras, list) or any(not isinstance(x, str) for x in extras):
             raise MappingError("extra_state must be a list of MCore storage keys")
-        node = {"id": row["id"], "inputs": names, "outputs": targets,
-                "op": row.get("op", "identity"), "params": row["params"],
-                "forward": forward, "input_dtypes": codes,
-                "extra_state": extras, "hf": row["hf"], "mcore": row["mcore"],
-                "hf_shapes": [list(specs[n].shape) for n in names] if forward else [list(t.shape) for t in result],
-                "mcore_shapes": [list(t.shape) for t in result] if forward else [list(specs[n].shape) for n in names],
-                "export_slice": row.get("export_slice"), "generate": row.get("generate"),
-                "shape_config": row.get("shape_config", {})}
-        for field, axis in node["shape_config"].items():
+        node = {
+            "id": row["id"],
+            "inputs": names,
+            "outputs": targets,
+            "op": row.get("op", "identity"),
+            "params": row["params"],
+            "forward": forward,
+            "input_dtypes": codes,
+            "extra_state": extras,
+            "hf": row["hf"],
+            "mcore": row["mcore"],
+            "hf_shapes": [list(specs[n].shape) for n in names]
+            if forward
+            else [list(t.shape) for t in result],
+            "mcore_shapes": [list(t.shape) for t in result]
+            if forward
+            else [list(specs[n].shape) for n in names],
+            "export_slice": row.get("export_slice"),
+            "generate": row.get("generate"),
+            "shape_config": row.get("shape_config", {}),
+        }
+        for config_field, axis in node["shape_config"].items():
             value = node["hf_shapes"][0][axis]
-            if field in shape_fields and shape_fields[field] != value:
-                raise MappingError(f"Conflicting tensor dimensions for {field}: {shape_fields[field]} vs {value}")
-            shape_fields[field] = value
-            set_field(configs, field, value)
+            if config_field in shape_fields and shape_fields[config_field] != value:
+                raise MappingError(
+                    f"Conflicting tensor dimensions for {config_field}: {shape_fields[config_field]} vs {value}"
+                )
+            shape_fields[config_field] = value
+            set_field(configs, config_field, value)
         for name, tensor in zip(targets, result):
             if name in outputs:
                 raise MappingError(f"Multiple rules write target {name}")
             if not tensor.shape or any(n <= 0 for n in tensor.shape):
-                raise MappingError(f"Target {name} needs a nonempty shape; reshape scalars explicitly")
+                raise MappingError(
+                    f"Target {name} needs a nonempty shape; reshape scalars explicitly"
+                )
             outputs[name] = TensorSpec(name, tuple(tensor.shape), DTYPE_CODES[str(tensor.dtype)])
         nodes.append(node)
         used.update(names)
     if available - used:
-        raise MappingError(f"Unmapped source tensors (use explicit ignore rules): {sorted(available - used)[:20]}")
+        raise MappingError(
+            f"Unmapped source tensors (use explicit ignore rules): {sorted(available - used)[:20]}"
+        )
     if not outputs:
         raise MappingError("Mapping produced no tensors")
-    return {"nodes": nodes, "outputs": outputs, "ignored": sorted(ignored), "zero_checks": zero_checks}
+    return {
+        "nodes": nodes,
+        "outputs": outputs,
+        "ignored": sorted(ignored),
+        "zero_checks": zero_checks,
+    }
 
 
 def plan_report(plan):
@@ -153,10 +196,18 @@ def compile_regions(plan, name="mapping"):
             fragment = tuple(hs[i] if source_shape is None else source_shape)
             if source_offset is not None and not any(source_offset) and fragment == tuple(hs[i]):
                 source_offset = None
-            pieces.append(Piece(
-                hf[i], mc[j], shape, tuple(offset or [0] * len(shape)), tuple(ms[j]),
-                source_offset=tuple(source_offset) if source_offset is not None else None,
-                source_shape=fragment, axes=tuple(axes) if axes is not None else None))
+            pieces.append(
+                Piece(
+                    hf[i],
+                    mc[j],
+                    shape,
+                    tuple(offset or [0] * len(shape)),
+                    tuple(ms[j]),
+                    source_offset=tuple(source_offset) if source_offset is not None else None,
+                    source_shape=fragment,
+                    axes=tuple(axes) if axes is not None else None,
+                )
+            )
 
         if op in ("identity", "reshape", "permute"):
             add(0, 0, axes=params.get("dims") if op == "permute" else None)
@@ -194,8 +245,14 @@ def compile_regions(plan, name="mapping"):
             zeros = (0,) * len(tail)
             for head in range(heads):
                 for projection in range(3):
-                    add(0, 0, (dim, *tail), ((head * 3 + projection) * dim, *zeros),
-                        ((projection * heads + head) * dim, *zeros), (dim, *tail))
+                    add(
+                        0,
+                        0,
+                        (dim, *tail),
+                        ((head * 3 + projection) * dim, *zeros),
+                        ((projection * heads + head) * dim, *zeros),
+                        (dim, *tail),
+                    )
         elif op == "qkv":
             groups = params["groups"]
             if params.get("output_gate", False):
@@ -209,12 +266,10 @@ def compile_regions(plan, name="mapping"):
                         for gate in range(2):
                             src = ((group * heads_per_group + head) * 2 + gate) * dim
                             dst = base + (gate * heads_per_group + head) * dim
-                            add(0, 0, (dim, *tail), (dst, *zeros),
-                                (src, *zeros), (dim, *tail))
+                            add(0, 0, (dim, *tail), (dst, *zeros), (src, *zeros), (dim, *tail))
                     for i in (1, 2):
                         dst = base + (2 * heads_per_group + i - 1) * dim
-                        add(i, 0, (dim, *tail), (dst, *zeros),
-                            (group * dim, *zeros), (dim, *tail))
+                        add(i, 0, (dim, *tail), (dst, *zeros), (group * dim, *zeros), (dim, *tail))
                 continue
             order = params.get("order", ["q", "k", "v"])
             sizes = [shape[0] // groups for shape in hs]
@@ -223,15 +278,30 @@ def compile_regions(plan, name="mapping"):
                 for label in order:
                     i = ["q", "k", "v"].index(label)
                     shape = (sizes[i], *hs[i][1:])
-                    add(i, 0, shape, (target_start, *([0] * (len(shape) - 1))),
-                        (group * sizes[i], *([0] * (len(shape) - 1))), shape)
+                    add(
+                        i,
+                        0,
+                        shape,
+                        (target_start, *([0] * (len(shape) - 1))),
+                        (group * sizes[i], *([0] * (len(shape) - 1))),
+                        shape,
+                    )
                     target_start += sizes[i]
         else:
             raise MappingError(f"No region compiler for {op}")
-    profile = Profile(pieces, shapes, name, extra_keys=tuple(sorted(set(extras))), physical_shapes=physical)
+    profile = Profile(
+        pieces, shapes, name, extra_keys=tuple(sorted(set(extras))), physical_shapes=physical
+    )
     # Reverse writes must cover each HF output once, including arbitrary split axes.
     if plan["nodes"] and not plan["nodes"][0]["forward"]:
         for key, shape in shapes.items():
-            validate_regions(key, shape, [(p.source_offset or (0,) * len(shape), p.source_shape)
-                                         for p in pieces if p.hf == key])
+            validate_regions(
+                key,
+                shape,
+                [
+                    (p.source_offset or (0,) * len(shape), p.source_shape)
+                    for p in pieces
+                    if p.hf == key
+                ],
+            )
     return profile

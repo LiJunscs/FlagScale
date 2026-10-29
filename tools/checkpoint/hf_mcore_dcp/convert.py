@@ -1,6 +1,7 @@
 # Copyright 2026 FlagOS Contributors
 # Licensed under the Apache License, Version 2.0.
 """Rule-driven HF / MCore conversion with ordinary tensor checkpoint storage."""
+
 from __future__ import annotations
 
 import argparse
@@ -104,20 +105,35 @@ def prepare(args):
     if forward:
         hf = _json(Path(args.source) / "config.json")
         ignored = mapping.get("ignore", {}).get("hf", [])
-        original = PrecisionSource(SafetensorReader(args.source), hf, normalize=canonical,
-                                   skip=lambda n: any(fnmatch.fnmatchcase(canonical(n), p) for p in ignored),
-                                   mxfp4=lambda n: any(fnmatch.fnmatchcase(canonical(n), p) for p in patterns))
+        original = PrecisionSource(
+            SafetensorReader(args.source),
+            hf,
+            normalize=canonical,
+            skip=lambda n: any(fnmatch.fnmatchcase(canonical(n), p) for p in ignored),
+            mxfp4=lambda n: any(fnmatch.fnmatchcase(canonical(n), p) for p in patterns),
+        )
         if adapter and hasattr(adapter, "normalize_config"):
             hf = adapter.normalize_config(hf, True, original.keys)
         mc = translate_config(mapping, hf, True)
         if adapter and hasattr(adapter, "finish_config"):
             mc = adapter.finish_config(mc, True)
         mode = args.conversion_mode or "dense"
-        policy = resolve_precision(original, hf, args.dtype, args.device, to_mcore=True, storage_mode=mode)
+        policy = resolve_precision(
+            original, hf, args.dtype, args.device, to_mcore=True, storage_mode=mode
+        )
         original.dtype, original.device = DENSE_DTYPES[policy.dtype], policy.device
-        specs = {key: replace(spec, dtype=DTYPE_CODES[str(original.dtype)], kind="dense", scale=None,
-                              scale_dtype=None) if spec.kind != "dense" else spec
-                 for key, spec in original.specs.items()}
+        specs = {
+            key: replace(
+                spec,
+                dtype=DTYPE_CODES[str(original.dtype)],
+                kind="dense",
+                scale=None,
+                scale_dtype=None,
+            )
+            if spec.kind != "dense"
+            else spec
+            for key, spec in original.specs.items()
+        }
     else:
         artifacts = read_mcore_artifacts(args.source)
         mc = artifacts["args"]
@@ -128,26 +144,37 @@ def prepare(args):
         index = Path(args.hf_reference) / "model.safetensors.index.json"
         reference_names = {}
         if index.is_file():
-            reference_names = {canonical(n): TensorSpec(n, (), "BF16")
-                               for n in _json(index)["weight_map"]}
+            reference_names = {
+                canonical(n): TensorSpec(n, (), "BF16") for n in _json(index)["weight_map"]
+            }
         if adapter and hasattr(adapter, "normalize_config"):
             reference = adapter.normalize_config(reference, True, reference_names)
         hf.update(reference)
         hf.update(translate_config(mapping, mc, False))
         if adapter and hasattr(adapter, "finish_config"):
             hf = adapter.finish_config(hf, False)
-        specs = {key: TensorSpec(key, tuple(item["shape"]), DTYPE_CODES.get(item["dtype"], item["dtype"]))
-                 for key, item in artifacts["model_tensors"].items()}
-    effective = (adapter.prepare_mapping(mapping, {"hf": hf, "mcore": mc}, specs, forward)
-                 if adapter and hasattr(adapter, "prepare_mapping") else mapping)
+        specs = {
+            key: TensorSpec(
+                key, tuple(item["shape"]), DTYPE_CODES.get(item["dtype"], item["dtype"])
+            )
+            for key, item in artifacts["model_tensors"].items()
+        }
+    effective = (
+        adapter.prepare_mapping(mapping, {"hf": hf, "mcore": mc}, specs, forward)
+        if adapter and hasattr(adapter, "prepare_mapping")
+        else mapping
+    )
     # Shape inference uses metadata only; storage contains ordinary tensors.
-    plan = compile_mapping(effective, specs, {"hf": hf, "mcore": mc}, forward=forward,
-                           dtype=args.dtype)
+    plan = compile_mapping(
+        effective, specs, {"hf": hf, "mcore": mc}, forward=forward, dtype=args.dtype
+    )
     profile = compile_regions(plan, mapping.get("profile", "mapping"))
     if forward:
         source = copy(original)
         source.specs = {key: original.specs[key] for key in profile.shapes}
-        source.physical_keys = {n for spec in source.specs.values() for n in (spec.name, spec.scale) if n}
+        source.physical_keys = {
+            n for spec in source.specs.values() for n in (spec.name, spec.scale) if n
+        }
         source.consumed = set()
         for pieces in _groups(profile).values():
             _storage_dtype(pieces, source, policy)
@@ -155,31 +182,66 @@ def prepare(args):
     else:
         reader = StreamingCheckpointReader(args.source, profile, ignore=plan["ignored"])
         dtypes = reader.tensor_dtypes()
-        output_specs = {name: replace(spec, dtype=DTYPE_CODES[str(dtypes[name])])
-                        for name, spec in plan["outputs"].items() if name in profile.shapes}
-        output_specs.update({name: spec for name, spec in plan["outputs"].items() if name not in profile.shapes})
-        source = SimpleNamespace(specs=output_specs, keys=set(output_specs),
-                                 low_precision_kinds={s.kind for s in output_specs.values() if s.kind != "dense"})
+        output_specs = {
+            name: replace(spec, dtype=DTYPE_CODES[str(dtypes[name])])
+            for name, spec in plan["outputs"].items()
+            if name in profile.shapes
+        }
+        output_specs.update(
+            {name: spec for name, spec in plan["outputs"].items() if name not in profile.shapes}
+        )
+        source = SimpleNamespace(
+            specs=output_specs,
+            keys=set(output_specs),
+            low_precision_kinds={s.kind for s in output_specs.values() if s.kind != "dense"},
+        )
         mode = "dense"
-        policy = resolve_precision(source, hf, args.dtype, args.device, to_mcore=False,
-                                   storage_mode=mode)
+        policy = resolve_precision(
+            source, hf, args.dtype, args.device, to_mcore=False, storage_mode=mode
+        )
         zero_getter = None
-    transforms = (adapter.tensor_transforms({"hf": hf, "mcore": mc}, profile.shapes, forward)
-                  if adapter and hasattr(adapter, "tensor_transforms") else {})
+    transforms = (
+        adapter.tensor_transforms({"hf": hf, "mcore": mc}, profile.shapes, forward)
+        if adapter and hasattr(adapter, "tensor_transforms")
+        else {}
+    )
     if forward and transforms:
         getter = source.get_tensor
         source.get_tensor = lambda name: _transform_tensor(name, getter(name), transforms, policy)
-    report = {"schema_version": 2, "direction": args.command, "profile": profile.name,
-              "checkpoint_content": "model_only", "model_semantics_validated": False,
-              "mapping": mapping, "configs": {"hf": hf, "mcore": mc},
-              "plan": plan_report(plan), "regions": profile.report(),
-              "precision": policy.report(), "value_checks_pending": plan["zero_checks"],
-              "tensor_value_transforms": [
-                  {"tensor": name, "operation": fn.__name__} for name, fn in sorted(transforms.items())]}
-    return SimpleNamespace(args=args, forward=forward, mapping=mapping, hf=hf, mc=mc, plan=plan,
-                           profile=profile, source=source, reader=reader, policy=policy, report=report,
-                           shard_size=shard_size, zero_getter=zero_getter, mode=mode,
-                           transforms=transforms, adapter=adapter)
+    report = {
+        "schema_version": 2,
+        "direction": args.command,
+        "profile": profile.name,
+        "checkpoint_content": "model_only",
+        "model_semantics_validated": False,
+        "mapping": mapping,
+        "configs": {"hf": hf, "mcore": mc},
+        "plan": plan_report(plan),
+        "regions": profile.report(),
+        "precision": policy.report(),
+        "value_checks_pending": plan["zero_checks"],
+        "tensor_value_transforms": [
+            {"tensor": name, "operation": fn.__name__} for name, fn in sorted(transforms.items())
+        ],
+    }
+    return SimpleNamespace(
+        args=args,
+        forward=forward,
+        mapping=mapping,
+        hf=hf,
+        mc=mc,
+        plan=plan,
+        profile=profile,
+        source=source,
+        reader=reader,
+        policy=policy,
+        report=report,
+        shard_size=shard_size,
+        zero_getter=zero_getter,
+        mode=mode,
+        transforms=transforms,
+        adapter=adapter,
+    )
 
 
 def execute(context):
@@ -201,11 +263,20 @@ def execute(context):
             raise MappingError(f"Cannot omit a nonzero tensor: {name}")
     with staged_output(args.output, args.overwrite, inputs) as output:
         if c.forward:
-            details = save_streaming_checkpoint(c.source, c.profile, c.policy, c.hf, output,
-                                                model_args=c.mc, max_shard_size=c.shard_size)
+            details = save_streaming_checkpoint(
+                c.source,
+                c.profile,
+                c.policy,
+                c.hf,
+                output,
+                model_args=c.mc,
+                max_shard_size=c.shard_size,
+            )
             details["iteration_dir"] = str(Path(args.output).resolve() / "iter_0000000")
-            (output / "iter_0000000" / "hf_export.json").write_text(json.dumps({
-                "schema_version": 2, "mapping": c.mapping, "hf_config": c.hf}, indent=2) + "\n")
+            (output / "iter_0000000" / "hf_export.json").write_text(
+                json.dumps({"schema_version": 2, "mapping": c.mapping, "hf_config": c.hf}, indent=2)
+                + "\n"
+            )
             copy_hf_assets(args.source, output / "iter_0000000" / "hf_assets")
             c.report["storage"] = details
         else:
@@ -214,15 +285,25 @@ def execute(context):
             if c.adapter and hasattr(c.adapter, "export_config"):
                 config = c.adapter.export_config(config)
             (output / "config.json").write_text(json.dumps(config, indent=2) + "\n")
+
             def tensors():
                 for name, tensor in c.reader.tensors():
                     yield name, _transform_tensor(name, tensor, c.transforms, c.policy)
                 for node in c.plan["nodes"]:
                     if node.get("generate"):
                         from tools.checkpoint.hf_mcore_dcp.layout.compiler import STORAGE_DTYPES
+
                         item = node["generate"]
                         for name in node["outputs"]:
-                            yield name, torch.full(item["shape"], item["value"], dtype=STORAGE_DTYPES[item["dtype"]])
+                            yield (
+                                name,
+                                torch.full(
+                                    item["shape"],
+                                    item["value"],
+                                    dtype=STORAGE_DTYPES[item["dtype"]],
+                                ),
+                            )
+
             writer = ShardedSafetensorWriter(output, c.shard_size)
             for name, tensor in encode_hf_tensors(tensors(), c.source, c.policy):
                 writer.add(name, tensor)
@@ -235,13 +316,21 @@ def execute(context):
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("command", choices=("hf-to-mcore", "mcore-to-hf", "export-mapping"))
-    parser.add_argument("--mapping", help="YAML/JSON structure composition; required unless saved with source")
+    parser.add_argument(
+        "--mapping", help="YAML/JSON structure composition; required unless saved with source"
+    )
     parser.add_argument("--mapping-override", action="append", default=[])
     parser.add_argument("--source")
     parser.add_argument("--output", required=True)
-    parser.add_argument("--hf-reference", help="Required for mcore-to-hf in this release: HF config and tokenizer/assets; no weights required")
-    parser.add_argument("--dtype", choices=("auto", "bf16", "fp16", "fp32"),
-                        help="Default: fp32 for HF import, auto for MCore export")
+    parser.add_argument(
+        "--hf-reference",
+        help="Required for mcore-to-hf in this release: HF config and tokenizer/assets; no weights required",
+    )
+    parser.add_argument(
+        "--dtype",
+        choices=("auto", "bf16", "fp16", "fp32"),
+        help="Default: fp32 for HF import, auto for MCore export",
+    )
     parser.add_argument("--conversion-mode", choices=("dense",), default="dense")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--max-shard-size", default="4GB")
@@ -260,7 +349,9 @@ def main(argv=None):
             if args.dry_run:
                 print(json.dumps(mapping, indent=2))
             else:
-                with Path(args.output).open("w" if args.overwrite else "x", encoding="utf-8") as stream:
+                with Path(args.output).open(
+                    "w" if args.overwrite else "x", encoding="utf-8"
+                ) as stream:
                     stream.write(json.dumps(mapping, indent=2) + "\n")
         else:
             if not args.source:

@@ -45,14 +45,29 @@ from .metadata import is_extra_state, resolve_iteration_dir
 from .precision import DENSE_DTYPES, HEADER_DTYPES
 
 MCORE_OUTPUT_OVERRIDES = dict(
-    tensor_model_parallel_size=1, pipeline_model_parallel_size=1,
-    expert_model_parallel_size=1, expert_tensor_parallel_size=1, context_parallel_size=1,
-    virtual_pipeline_model_parallel_size=None, world_size=1, data_parallel_size=1,
-    rank=0, local_rank=0, sequence_parallel=False,
-    no_save_optim=True, no_save_rng=True,
-    iteration=0, ckpt_format="torch_dist", use_dist_ckpt=True, use_distributed_optimizer=False,
-    fp8=None, fp4=None, fp8_param_gather=False, fp4_param_gather=False,
-    fp8_param=False, fp4_param=False,
+    tensor_model_parallel_size=1,
+    pipeline_model_parallel_size=1,
+    expert_model_parallel_size=1,
+    expert_tensor_parallel_size=1,
+    context_parallel_size=1,
+    virtual_pipeline_model_parallel_size=None,
+    world_size=1,
+    data_parallel_size=1,
+    rank=0,
+    local_rank=0,
+    sequence_parallel=False,
+    no_save_optim=True,
+    no_save_rng=True,
+    iteration=0,
+    ckpt_format="torch_dist",
+    use_dist_ckpt=True,
+    use_distributed_optimizer=False,
+    fp8=None,
+    fp4=None,
+    fp8_param_gather=False,
+    fp4_param_gather=False,
+    fp8_param=False,
+    fp4_param=False,
 )
 
 
@@ -75,12 +90,19 @@ def _storage_dtype(pieces, source, policy):
         if len(types) != 1:
             raise MappingError("Cannot fuse different integer/floating storage dtypes")
         return integers[next(iter(types))]
-    dtypes = {HEADER_DTYPES[code] if code in HEADER_DTYPES and policy.preserve_source_dtypes
-              else torch.float32 if code == "F32" else DENSE_DTYPES[policy.dtype]
-              for code in types}
+    dtypes = {
+        HEADER_DTYPES[code]
+        if code in HEADER_DTYPES and policy.preserve_source_dtypes
+        else torch.float32
+        if code == "F32"
+        else DENSE_DTYPES[policy.dtype]
+        for code in types
+    }
     if len(dtypes) != 1:
-        raise MappingError(f"Cannot fuse different source dtypes into one DCP tensor without casting: "
-                           f"{pieces[0].key}: {sorted(types)}; choose an explicit --dtype if appropriate")
+        raise MappingError(
+            f"Cannot fuse different source dtypes into one DCP tensor without casting: "
+            f"{pieces[0].key}: {sorted(types)}; choose an explicit --dtype if appropriate"
+        )
     return next(iter(dtypes))
 
 
@@ -89,8 +111,11 @@ def _checkpoint_args(model_args, policy):
         raise MappingError("MCore output requires explicit model args")
     values = dict(model_args)
     values.update(MCORE_OUTPUT_OVERRIDES)
-    values.update(bf16=policy.dtype == "bf16", fp16=policy.dtype == "fp16",
-                  params_dtype=DENSE_DTYPES[policy.dtype])
+    values.update(
+        bf16=policy.dtype == "bf16",
+        fp16=policy.dtype == "fp16",
+        params_dtype=DENSE_DTYPES[policy.dtype],
+    )
     return SimpleNamespace(**values)
 
 
@@ -113,8 +138,11 @@ class _LazySaveData:
             destinations[piece.hf].add(piece.key)
         # QKV fragments reuse each source matrix within one global target.
         # Release on its final fragment; never cache across unrelated targets.
-        self._remaining = {name: count for name, count in counts.items()
-                           if count > 1 and len(destinations[name]) == 1}
+        self._remaining = {
+            name: count
+            for name, count in counts.items()
+            if count > 1 and len(destinations[name]) == 1
+        }
         self._source_cache = {}
 
     def _source_tensor(self, name):
@@ -183,24 +211,35 @@ def _write_bucket(writer, plan, resolver):
         for item in bytes_items:
             data = resolver.resolve_data(item)
             write_results.append(
-                _write_item(writer.transforms, stream, data, item, file_name,
-                            writer.serialization_format))
+                _write_item(
+                    writer.transforms, stream, data, item, file_name, writer.serialization_format
+                )
+            )
         for item in tensor_items:
             data = resolver.resolve_data(item)
             if data.device.type != "cpu":
                 data = data.to("cpu")
             write_results.append(
-                _write_item(writer.transforms, stream, data, item, file_name,
-                            writer.serialization_format))
+                _write_item(
+                    writer.transforms, stream, data, item, file_name, writer.serialization_format
+                )
+            )
         os.fsync(stream.fileno())
     return write_results
 
 
-def save_streaming_checkpoint(source, profile, policy, config, output_root, *, model_args,
-                               max_shard_size="4GB"):
+def save_streaming_checkpoint(
+    source, profile, policy, config, output_root, *, model_args, max_shard_size="4GB"
+):
     require_world_one()
-    max_shard_size = parse_size(max_shard_size) if isinstance(max_shard_size, str) else max_shard_size
-    if not isinstance(max_shard_size, int) or isinstance(max_shard_size, bool) or max_shard_size <= 0:
+    max_shard_size = (
+        parse_size(max_shard_size) if isinstance(max_shard_size, str) else max_shard_size
+    )
+    if (
+        not isinstance(max_shard_size, int)
+        or isinstance(max_shard_size, bool)
+        or max_shard_size <= 0
+    ):
         raise MappingError("max_shard_size must be a positive byte count")
     saved_args = _checkpoint_args(model_args, policy)
     root = Path(output_root)
@@ -216,21 +255,33 @@ def save_streaming_checkpoint(source, profile, policy, config, output_root, *, m
             chunk = ChunkStorageMetadata(torch.Size(piece.offset), torch.Size(piece.shape))
             chunks.append(chunk)
             index = MetadataIndex(key, piece.offset, i)
-            items.append(WriteItem(index, WriteItemType.SHARD,
-                                   tensor_data=TensorWriteData(chunk, properties, torch.Size(piece.global_shape))))
+            items.append(
+                WriteItem(
+                    index,
+                    WriteItemType.SHARD,
+                    tensor_data=TensorWriteData(chunk, properties, torch.Size(piece.global_shape)),
+                )
+            )
             lookup[index] = piece
-        storage_metadata[key] = TensorStorageMetadata(properties, torch.Size(pieces[0].global_shape), chunks)
+        storage_metadata[key] = TensorStorageMetadata(
+            properties, torch.Size(pieces[0].global_shape), chunks
+        )
     extra_keys = sorted(set(profile.extra_keys))
     for key in extra_keys:
         storage_metadata[key] = BytesStorageMetadata()
         items.append(WriteItem(MetadataIndex(key), WriteItemType.BYTE_IO))
     # No high-level save wrapper: neither a real distributed group nor an
     # async worker/pinned copy of the whole state dictionary is needed.
-    writer = FileSystemWriter(directory, single_file_per_rank=True, thread_count=1,
-                              per_thread_copy_ahead=0, sync_files=True, overwrite=False)
+    writer = FileSystemWriter(
+        directory,
+        single_file_per_rank=True,
+        thread_count=1,
+        per_thread_copy_ahead=0,
+        sync_files=True,
+        overwrite=False,
+    )
     writer.set_up_storage_writer(is_coordinator=True)
-    plans = [writer.prepare_local_plan(plan) for plan in
-             _file_plans(items, max_shard_size)]
+    plans = [writer.prepare_local_plan(plan) for plan in _file_plans(items, max_shard_size)]
     # Allocate every file prefix in one call. These are storage buckets, not
     # distributed ranks; separately planning each bucket would reuse __0_0.distcp.
     plans = writer.prepare_global_plan(plans)
@@ -243,7 +294,11 @@ def save_streaming_checkpoint(source, profile, policy, config, output_root, *, m
             raise MappingError("DCP writer did not persist the complete file plan")
         results.extend(written)
     expected = {item.index for item in items}
-    if resolver.resolved != expected or len(results) != len(expected) or {r.index for r in results} != expected:
+    if (
+        resolver.resolved != expected
+        or len(results) != len(expected)
+        or {r.index for r in results} != expected
+    ):
         raise MappingError("DCP writer did not resolve and persist the complete global plan")
     storage_files = {r.storage_data.relative_path for r in results}
     if len(storage_files) != len(plans):
@@ -254,22 +309,37 @@ def save_streaming_checkpoint(source, profile, policy, config, output_root, *, m
     writer.finish(Metadata(storage_metadata), [results])
     common = {
         "args": saved_args,
-        "checkpoint_version": 3.0, "iteration": 0,
-        "content_metadata": {"non_homogeneous_layers": True, "singleton_local_shards": False,
-                             "checkpoint_content": "model_only", "model_config_source": "hf_config",
-                             "conversion": policy.report(),
-                             "profile_revision": profile.revision},
+        "checkpoint_version": 3.0,
+        "iteration": 0,
+        "content_metadata": {
+            "non_homogeneous_layers": True,
+            "singleton_local_shards": False,
+            "checkpoint_content": "model_only",
+            "model_config_source": "hf_config",
+            "conversion": policy.report(),
+            "profile_revision": profile.revision,
+        },
     }
     torch.save(common, directory / "common.pt")
-    marker = {"sharded_backend": "torch_dist", "sharded_backend_version": 1,
-              "common_backend": "torch", "common_backend_version": 1}
+    marker = {
+        "sharded_backend": "torch_dist",
+        "sharded_backend_version": 1,
+        "common_backend": "torch",
+        "common_backend_version": 1,
+    }
     (directory / "metadata.json").write_text(json.dumps(marker, indent=2) + "\n", encoding="utf-8")
     (root / "latest_checkpointed_iteration.txt").write_text("0", encoding="utf-8")
-    return {"iteration_dir": str(directory), "stored_tensor_count": len(groups),
-            "stored_chunk_count": len(lookup), "extra_state_count": len(extra_keys),
-            "storage_file_count": len(storage_files), "max_shard_size_bytes": max_shard_size,
-            "largest_storage_file_bytes": max(
-                ((directory / name).stat().st_size for name in storage_files), default=0)}
+    return {
+        "iteration_dir": str(directory),
+        "stored_tensor_count": len(groups),
+        "stored_chunk_count": len(lookup),
+        "extra_state_count": len(extra_keys),
+        "storage_file_count": len(storage_files),
+        "max_shard_size_bytes": max_shard_size,
+        "largest_storage_file_bytes": max(
+            ((directory / name).stat().st_size for name in storage_files), default=0
+        ),
+    }
 
 
 class _ReadDestination:
@@ -300,26 +370,40 @@ class StreamingCheckpointReader:
         for piece in profile.pieces:
             self.by_hf[piece.hf].append(piece)
         if (self.directory / "preserved_quantization.json").is_file():
-            raise MappingError("This checkpoint uses removed preserved-payload adapters; convert from the original HF source")
+            raise MappingError(
+                "This checkpoint uses removed preserved-payload adapters; convert from the original HF source"
+            )
         self._validate_metadata()
         self.tensor_dtypes()  # Reject implicit promotion when joining MCore pieces.
 
     def tensor_dtypes(self):
         dtypes = {}
         for name, pieces in self.by_hf.items():
-            types = {self.metadata.state_dict_metadata[piece.key].properties.dtype for piece in pieces}
+            types = {
+                self.metadata.state_dict_metadata[piece.key].properties.dtype for piece in pieces
+            }
             if len(types) != 1:
-                raise MappingError(f"Inconsistent source DCP dtypes for {name}: {sorted(map(str, types))}")
+                raise MappingError(
+                    f"Inconsistent source DCP dtypes for {name}: {sorted(map(str, types))}"
+                )
             dtypes[name] = next(iter(types))
         return dtypes
 
     def _validate_metadata(self):
-        ignored = ("optimizer", "rng_state", "rerun_state_machine", "opt_param_scheduler",
-                   "common_state", "num_floating_point_operations_so_far")
+        ignored = (
+            "optimizer",
+            "rng_state",
+            "rerun_state_machine",
+            "opt_param_scheduler",
+            "common_state",
+            "num_floating_point_operations_so_far",
+        )
 
         def _is_ignored(key: str) -> bool:
-            if any(key == prefix or key.startswith(prefix + ".") or key.startswith(prefix + "/")
-                   for prefix in ignored):
+            if any(
+                key == prefix or key.startswith(prefix + ".") or key.startswith(prefix + "/")
+                for prefix in ignored
+            ):
                 return True
             # Megatron training saves persist trainer rerun-state bytes as
             # rerun_state_machine_state/shard_<r>_<world> — trainer metadata,
@@ -337,8 +421,10 @@ class StreamingCheckpointReader:
             if not isinstance(entry, TensorStorageMetadata):
                 raise MappingError(f"Expected DCP tensor: {key}")
         if unknown or self.groups.keys() - self.metadata.state_dict_metadata.keys():
-            raise MappingError(f"DCP schema differs from mapping: unknown={unknown[:20]}, "
-                               f"missing={sorted(self.groups.keys() - self.metadata.state_dict_metadata.keys())[:20]}")
+            raise MappingError(
+                f"DCP schema differs from mapping: unknown={unknown[:20]}, "
+                f"missing={sorted(self.groups.keys() - self.metadata.state_dict_metadata.keys())[:20]}"
+            )
         file_sizes = {}
         for key, pieces in self.groups.items():
             entry = self.metadata.state_dict_metadata[key]
@@ -346,10 +432,20 @@ class StreamingCheckpointReader:
             if actual != self.profile.physical_shapes.get(key, expected):
                 raise MappingError(f"DCP global shape mismatch: {key}: {actual} != {expected}")
             dtype = entry.properties.dtype
-            if dtype not in (torch.float32, torch.float16, torch.bfloat16, torch.int32, torch.int64):
-                raise MappingError(f"Unsupported raw DCP precision {dtype}: {key}; "
-                                   "this adapter requires standard dense model tensors")
-            validate_regions(key, actual, [(tuple(c.offsets), tuple(c.sizes)) for c in entry.chunks])
+            if dtype not in (
+                torch.float32,
+                torch.float16,
+                torch.bfloat16,
+                torch.int32,
+                torch.int64,
+            ):
+                raise MappingError(
+                    f"Unsupported raw DCP precision {dtype}: {key}; "
+                    "this adapter requires standard dense model tensors"
+                )
+            validate_regions(
+                key, actual, [(tuple(c.offsets), tuple(c.sizes)) for c in entry.chunks]
+            )
             for i, chunk in enumerate(entry.chunks):
                 index = MetadataIndex(key, chunk.offsets, i)
                 info = self.metadata.storage_data.get(index)
@@ -360,7 +456,11 @@ class StreamingCheckpointReader:
                     if not path.is_relative_to(self.directory.resolve()) or not path.is_file():
                         raise MappingError(f"Missing or external DCP shard: {info.relative_path}")
                     file_sizes[path] = path.stat().st_size
-                if info.offset < 0 or info.length <= 0 or info.offset + info.length > file_sizes[path]:
+                if (
+                    info.offset < 0
+                    or info.length <= 0
+                    or info.offset + info.length > file_sizes[path]
+                ):
                     raise MappingError(f"Invalid DCP byte range: {index}")
 
     def _read_piece(self, piece):
@@ -369,19 +469,24 @@ class StreamingCheckpointReader:
         requests, covered = [], 0
         for i, chunk in enumerate(entry.chunks):
             start = tuple(max(a, b) for a, b in zip(piece.offset, chunk.offsets))
-            end = tuple(min(a + n, b + m) for a, n, b, m in zip(
-                piece.offset, piece.shape, chunk.offsets, chunk.sizes))
+            end = tuple(
+                min(a + n, b + m)
+                for a, n, b, m in zip(piece.offset, piece.shape, chunk.offsets, chunk.sizes)
+            )
             lengths = tuple(b - a for a, b in zip(start, end))
             if any(n <= 0 for n in lengths):
                 continue
             covered += math.prod(lengths)
-            requests.append(ReadItem(
-                type=LoadItemType.TENSOR, dest_index=MetadataIndex(piece.hf),
-                dest_offsets=torch.Size(a - b for a, b in zip(start, piece.offset)),
-                storage_index=MetadataIndex(piece.key, chunk.offsets, i),
-                storage_offsets=torch.Size(a - b for a, b in zip(start, chunk.offsets)),
-                lengths=torch.Size(lengths),
-            ))
+            requests.append(
+                ReadItem(
+                    type=LoadItemType.TENSOR,
+                    dest_index=MetadataIndex(piece.hf),
+                    dest_offsets=torch.Size(a - b for a, b in zip(start, piece.offset)),
+                    storage_index=MetadataIndex(piece.key, chunk.offsets, i),
+                    storage_offsets=torch.Size(a - b for a, b in zip(start, chunk.offsets)),
+                    lengths=torch.Size(lengths),
+                )
+            )
         if covered != math.prod(piece.shape):
             raise MappingError(f"Incomplete read coverage for {piece.hf}")
         plan = self.reader.prepare_local_plan(LoadPlan(requests))

@@ -1,6 +1,7 @@
 # Copyright 2026 FlagOS Contributors
 # Licensed under the Apache License, Version 2.0.
 """Shared config aliases, nested fields, defaults and small explicit expressions."""
+
 import operator
 from copy import deepcopy
 
@@ -63,9 +64,16 @@ def resolve(value, configs):
     if isinstance(value, dict):
         if set(value) == {"op", "args"}:
             args = [resolve(item, configs) for item in value["args"]]
-            operations = {"add": operator.add, "sub": operator.sub, "mul": operator.mul,
-                          "div": operator.truediv, "floordiv": operator.floordiv,
-                          "not": operator.not_, "int": int, "exactdiv": _exactdiv}
+            operations = {
+                "add": operator.add,
+                "sub": operator.sub,
+                "mul": operator.mul,
+                "div": operator.truediv,
+                "floordiv": operator.floordiv,
+                "not": operator.not_,
+                "int": int,
+                "exactdiv": _exactdiv,
+            }
             if value["op"] not in operations:
                 raise MappingError(f"Unknown config operation: {value['op']}")
             try:
@@ -109,7 +117,11 @@ def translate_config(mapping, source, forward):
         aliases = spec["mcore"]
         if isinstance(aliases, str):
             aliases = [aliases]
-        if not isinstance(aliases, list) or not aliases or any(not isinstance(x, str) for x in aliases):
+        if (
+            not isinstance(aliases, list)
+            or not aliases
+            or any(not isinstance(x, str) for x in aliases)
+        ):
             raise MappingError(f"Invalid config aliases: {hf}")
         fields.append({**spec, "hf": hf, "mcore": aliases})
     target = translate_fields(fields, source, forward)

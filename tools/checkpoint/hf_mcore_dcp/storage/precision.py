@@ -1,19 +1,22 @@
 # Copyright 2026 FlagOS Contributors
 # Licensed under the Apache License, Version 2.0.
 """Tensor descriptors, precision policies and FP8/MXFP4 storage conversion."""
+
 from __future__ import annotations
 
 import copy
 import math
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 from .codecs import decode_quantized_matrix
 
-from .hf import SafetensorReader
+if TYPE_CHECKING:
+    from .hf import SafetensorReader
 
 DENSE_DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
 HEADER_DTYPES = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32}
@@ -21,8 +24,10 @@ FP8_DTYPES = {"F8_E4M3", "F8_E4M3FN"}
 E8M0_DTYPES = {"F8_E8M0", "F8_E8M0FNU"}
 SCALE_SUFFIXES = (".weight_scale_inv", ".scale")
 
+
 class PrecisionError(ValueError):
     pass
+
 
 @dataclass(frozen=True)
 class TensorSpec:
@@ -32,6 +37,7 @@ class TensorSpec:
     kind: str = "dense"
     scale: str | None = None
     scale_dtype: str | None = None
+
 
 @dataclass(frozen=True)
 class PrecisionPolicy:
@@ -45,15 +51,20 @@ class PrecisionPolicy:
     source_quantized_kinds: tuple[str, ...] = ()
 
     def report(self) -> dict:
-        return dict(dtype=self.dtype, device=self.device,
-                    dtype_scope="config default / quantized-input decode dtype; auto preserves individual dense dtypes",
-                    preserve_source_dtypes=self.preserve_source_dtypes,
-                    reason=self.reason, warnings=list(self.warnings),
-                    source_dtype_counts=dict(self.source_dtype_counts),
-                    source_quantized_kinds=list(self.source_quantized_kinds),
-                    storage_mode="dense",
-                    scale_handling=("decode_to_dense_dcp" if self.source_quantized_kinds
-                                    else "no_quantization"))
+        return dict(
+            dtype=self.dtype,
+            device=self.device,
+            dtype_scope="config default / quantized-input decode dtype; auto preserves individual dense dtypes",
+            preserve_source_dtypes=self.preserve_source_dtypes,
+            reason=self.reason,
+            warnings=list(self.warnings),
+            source_dtype_counts=dict(self.source_dtype_counts),
+            source_quantized_kinds=list(self.source_quantized_kinds),
+            storage_mode="dense",
+            scale_handling=(
+                "decode_to_dense_dcp" if self.source_quantized_kinds else "no_quantization"
+            ),
+        )
 
 
 def validate_quantization_config(config: Mapping[str, Any]) -> None:
@@ -68,19 +79,39 @@ def validate_quantization_config(config: Mapping[str, Any]) -> None:
         if quant.get("scale_fmt") not in (None, "ue8m0"):
             raise PrecisionError("Unsupported scale_fmt")
         excluded = quant.get("modules_to_not_convert")
-        if excluded is not None and (not isinstance(excluded, list) or any(
-                not isinstance(name, str) or not name for name in excluded)):
+        if excluded is not None and (
+            not isinstance(excluded, list)
+            or any(not isinstance(name, str) or not name for name in excluded)
+        ):
             raise PrecisionError("modules_to_not_convert must be a list of nonempty module names")
-    if config.get("expert_dtype") not in (None, "fp4", "fp8", "bf16", "bfloat16",
-                                           "fp16", "float16", "fp32", "float32"):
+    if config.get("expert_dtype") not in (
+        None,
+        "fp4",
+        "fp8",
+        "bf16",
+        "bfloat16",
+        "fp16",
+        "float16",
+        "fp32",
+        "float32",
+    ):
         raise PrecisionError("Unsupported expert_dtype (MXFP4 is distinct from NVFP4/int8)")
 
 
 class PrecisionSource:
     """Compile physical tensors and scales into logical, dense mapping inputs."""
 
-    def __init__(self, reader: SafetensorReader, config: Mapping[str, Any],
-                 *, dtype: torch.dtype = torch.float32, device: str = "cpu", normalize=None, skip=None, mxfp4=None):
+    def __init__(
+        self,
+        reader: SafetensorReader,
+        config: Mapping[str, Any],
+        *,
+        dtype: torch.dtype = torch.float32,
+        device: str = "cpu",
+        normalize=None,
+        skip=None,
+        mxfp4=None,
+    ):
         normalize = normalize or (lambda name: name)
         mxfp4 = mxfp4 or (lambda name: False)
         validate_quantization_config(config)
@@ -98,7 +129,8 @@ class PrecisionSource:
             name.removesuffix(".weight") + suffix
             for name in self.physical_keys
             if dtypes[name] in FP8_DTYPES or (dtypes[name] in {"I8", "U8"} and mxfp4(name))
-            for suffix in SCALE_SUFFIXES if name.removesuffix(".weight") + suffix in candidates
+            for suffix in SCALE_SUFFIXES
+            if name.removesuffix(".weight") + suffix in candidates
         }
         paired_scales = set()
         quant = config.get("quantization_config") or {}
@@ -114,7 +146,9 @@ class PrecisionSource:
                     raise PrecisionError(f"FP8 weight requires quantization_config: {name}")
             elif dtype_code in {"I8", "U8"}:
                 if not mxfp4(name):
-                    raise PrecisionError(f"Unsupported HF tensor {name} ({dtype_code}); not declared MXFP4")
+                    raise PrecisionError(
+                        f"Unsupported HF tensor {name} ({dtype_code}); not declared MXFP4"
+                    )
                 kind = "mxfp4"
                 if len(shape) != 2:
                     raise PrecisionError(f"Packed MXFP4 weight must be a matrix: {name}")
@@ -123,11 +157,15 @@ class PrecisionSource:
                 raise PrecisionError(f"Unsupported HF tensor {name} ({dtype_code})")
             if kind != "dense":
                 if len(shape) != 2 or not all(shape) or not name.endswith(".weight"):
-                    raise PrecisionError(f"Quantized linear weight must be a nonempty matrix: {name}")
+                    raise PrecisionError(
+                        f"Quantized linear weight must be a nonempty matrix: {name}"
+                    )
                 candidates = [name.removesuffix(".weight") + suffix for suffix in SCALE_SUFFIXES]
                 matches = [candidate for candidate in candidates if candidate in scales]
                 if len(matches) != 1:
-                    raise PrecisionError(f"Expected exactly one scale tensor for {name}; found {matches}")
+                    raise PrecisionError(
+                        f"Expected exactly one scale tensor for {name}; found {matches}"
+                    )
                 scale_name = matches[0]
                 scale_dtype = dtypes[scale_name]
                 if scale_dtype not in {*HEADER_DTYPES, *E8M0_DTYPES, "U8"}:
@@ -138,13 +176,21 @@ class PrecisionSource:
                 expected = (math.ceil(rows / 128), math.ceil(cols / 128))
                 if kind == "mxfp4":
                     if cols % 32:
-                        raise PrecisionError(f"MXFP4 reduction dimension must be divisible by 32: {name}")
+                        raise PrecisionError(
+                            f"MXFP4 reduction dimension must be divisible by 32: {name}"
+                        )
                     expected = (rows, cols // 32)
                 if shapes[scale_name] != expected:
-                    raise PrecisionError(f"Scale shape mismatch: {scale_name} {shapes[scale_name]} != {expected}")
+                    raise PrecisionError(
+                        f"Scale shape mismatch: {scale_name} {shapes[scale_name]} != {expected}"
+                    )
                 paired_scales.add(scale_name)
             self.specs[canonical] = TensorSpec(
-                name, shape, dtype_code, kind, scale_name,
+                name,
+                shape,
+                dtype_code,
+                kind,
+                scale_name,
                 dtypes[scale_name] if scale_name else None,
             )
         if scales != paired_scales:
@@ -178,10 +224,13 @@ class PrecisionSource:
             packed = self.reader.get_bytes(spec.name)
             scale = self._scale(spec)
             try:
-                result = decode_quantized_matrix(packed, scale, spec.kind, spec.shape,
-                                                  self.dtype, device=self.device)
+                result = decode_quantized_matrix(
+                    packed, scale, spec.kind, spec.shape, self.dtype, device=self.device
+                )
             except ValueError as error:
-                raise PrecisionError(f"Non-finite/overflowing dequantized weight: {spec.name}") from error
+                raise PrecisionError(
+                    f"Non-finite/overflowing dequantized weight: {spec.name}"
+                ) from error
             self.consumed.add(spec.scale)
         self.consumed.add(spec.name)
         return result
@@ -192,11 +241,20 @@ class PrecisionSource:
             raise PrecisionError(f"Unconsumed physical HF tensors: {sorted(remaining)[:20]}")
 
 
-def resolve_precision(source, config: Mapping[str, Any], requested: str, device: str, *,
-                      to_mcore: bool, storage_mode: str = "dense") -> PrecisionPolicy:
+def resolve_precision(
+    source,
+    config: Mapping[str, Any],
+    requested: str,
+    device: str,
+    *,
+    to_mcore: bool,
+    storage_mode: str = "dense",
+) -> PrecisionPolicy:
     """Decode quantized sources in FP32 unless a lower precision is explicitly requested."""
     if storage_mode != "dense":
-        raise PrecisionError("Only ordinary tensor DCP is supported; preserved wrappers require training adapters")
+        raise PrecisionError(
+            "Only ordinary tensor DCP is supported; preserved wrappers require training adapters"
+        )
     if requested not in {"auto", *DENSE_DTYPES}:
         raise PrecisionError(f"Unsupported dtype: {requested}")
     if device == "auto":
@@ -222,22 +280,36 @@ def resolve_precision(source, config: Mapping[str, Any], requested: str, device:
         code = "fp32" if spec.kind != "dense" else dtype_names.get(spec.dtype)
         if code:
             populations[code] += math.prod(spec.shape)
-    dtype = requested if requested != "auto" else max(populations, key=populations.get, default="bf16")
+    dtype = (
+        requested if requested != "auto" else max(populations, key=populations.get, default="bf16")
+    )
     if to_mcore and kinds and requested == "auto":
         dtype = "fp32"
     notes = []
-    declared = bool(config.get("quantization_config")) or config.get("expert_dtype") in {"fp8", "fp4"}
+    declared = bool(config.get("quantization_config")) or config.get("expert_dtype") in {
+        "fp8",
+        "fp4",
+    }
     if declared and not kinds:
         label = "HF source config" if to_mcore else "HF reference config"
-        notes.append(f"{label} declares quantization, but actual source weights are dense; "
-                     "ignoring that recipe. No quantization or scale tensors will be generated.")
-    reason = "Preserve actual source tensor dtypes with auto; decode quantized inputs to dense tensors"
+        notes.append(
+            f"{label} declares quantization, but actual source weights are dense; "
+            "ignoring that recipe. No quantization or scale tensors will be generated."
+        )
+    reason = (
+        "Preserve actual source tensor dtypes with auto; decode quantized inputs to dense tensors"
+    )
     if requested != "auto":
         reason = "Explicit dense dtype override; FP32 and integer tensors remain unchanged"
     return PrecisionPolicy(
-        dtype=dtype, device=device, reason=reason,
-        preserve_source_dtypes=requested == "auto", warnings=tuple(notes),
-        source_dtype_counts=tuple(sorted(Counter(spec.dtype for spec in source.specs.values()).items())),
+        dtype=dtype,
+        device=device,
+        reason=reason,
+        preserve_source_dtypes=requested == "auto",
+        warnings=tuple(notes),
+        source_dtype_counts=tuple(
+            sorted(Counter(spec.dtype for spec in source.specs.values()).items())
+        ),
         source_quantized_kinds=tuple(sorted(kinds)),
     )
 
@@ -266,7 +338,9 @@ def encode_hf_tensors(tensors, source, policy: PrecisionPolicy):
         if spec is None:
             raise PrecisionError(f"HF output absent from mapped schema: {name}")
         if tuple(tensor.shape) != spec.shape:
-            raise PrecisionError(f"HF output shape mismatch: {name} {tuple(tensor.shape)} != {spec.shape}")
+            raise PrecisionError(
+                f"HF output shape mismatch: {name} {tuple(tensor.shape)} != {spec.shape}"
+            )
         if tensor.is_floating_point():
             if tensor.dtype not in HEADER_DTYPES.values():
                 raise PrecisionError(f"Unsupported MCore storage dtype: {name}: {tensor.dtype}")
