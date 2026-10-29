@@ -5,7 +5,7 @@ adapter: tools.checkpoint.deepseek_v4.adapter
 parameters:
 - embedding
 - output_te
-- final_norm
+- final_norm_te
 - separate_norms
 - mla_query
 - absorbed_kv
@@ -22,6 +22,42 @@ parameters:
 args:
 - rope
 - yarn
+# DSv4's TE norms require empty extra-state entries during ordinary DCP loading.
+rules:
+- id: attn_norm
+  scope: layer
+  hf: ['{attention_norm}.weight']
+  mcore: [input_layernorm.weight]
+  extra_state: [input_layernorm._extra_state/shard_0_1]
+- id: ffn_norm
+  scope: layer
+  hf: ['{mlp_norm}.weight']
+  mcore: [pre_mlp_layernorm.weight]
+  extra_state: [pre_mlp_layernorm._extra_state/shard_0_1]
+- id: q_norm
+  scope: layer
+  optional: true
+  hf: ['{attention}.q_norm.weight']
+  mcore: [self_attention.q_layernorm.weight]
+  extra_state: [self_attention.q_layernorm._extra_state/shard_0_1]
+- id: kv_norm
+  scope: layer
+  optional: true
+  hf: ['{attention}.kv_norm.weight']
+  mcore: [self_attention.kv_layernorm.weight]
+  extra_state: [self_attention.kv_layernorm._extra_state/shard_0_1]
+- id: compress_norm
+  scope: layer
+  optional: true
+  hf: ['{attention}.compressor.norm.weight']
+  mcore: [self_attention.core_attention.compressor.norm.weight]
+  extra_state: [self_attention.core_attention.compressor.norm._extra_state/shard_0_1]
+- id: index_compress_norm
+  scope: layer
+  optional: true
+  hf: ['{attention}.indexer.compressor.norm.weight']
+  mcore: [self_attention.core_attention.indexer.compressor.norm.weight]
+  extra_state: [self_attention.core_attention.indexer.compressor.norm._extra_state/shard_0_1]
 quantization:
   mxfp4:
   - layers.*.ffn.experts.*.w*.weight
