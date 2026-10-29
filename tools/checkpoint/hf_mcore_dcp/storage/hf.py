@@ -19,7 +19,6 @@ from .metadata import HuggingFaceIOError, SafetensorMetadataReader
 
 
 class SafetensorReader(SafetensorMetadataReader):
-
     def get_bytes(self, name: str) -> torch.Tensor:
         """Read one-byte storage (FP8, packed FP4 or E8M0), without a dtype cast."""
         entry = self._metadata[name]
@@ -38,8 +37,15 @@ class SafetensorReader(SafetensorMetadataReader):
         if name not in self._weight_map:
             raise HuggingFaceIOError(f"HF tensor not found: {name}")
         entry = self._metadata[name]
-        dense = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32,
-                 "I32": torch.int32, "I64": torch.int64, "I8": torch.int8, "U8": torch.uint8}
+        dense = {
+            "BF16": torch.bfloat16,
+            "F16": torch.float16,
+            "F32": torch.float32,
+            "I32": torch.int32,
+            "I64": torch.int64,
+            "I8": torch.int8,
+            "U8": torch.uint8,
+        }
         if entry["dtype"] in dense:
             # Read dense values directly; quantized payloads/scales use get_bytes.
             dtype = dense[entry["dtype"]]
@@ -64,9 +70,13 @@ def copy_hf_assets(reference_dir: str | Path, output_dir: str | Path) -> None:
     target = Path(output_dir).expanduser().resolve()
     target.mkdir(parents=True, exist_ok=True)
     for item in source.iterdir():
-        if item.name == "conversion_report.json" or item.name.startswith(".") or item.is_dir() or item.suffix in {
-            ".safetensors", ".bin", ".pt", ".pth"
-        } or item.name.endswith(".index.json"):
+        if (
+            item.name == "conversion_report.json"
+            or item.name.startswith(".")
+            or item.is_dir()
+            or item.suffix in {".safetensors", ".bin", ".pt", ".pth"}
+            or item.name.endswith(".index.json")
+        ):
             continue
         destination = target / item.name
         shutil.copy2(item, destination)
@@ -91,9 +101,7 @@ class ShardedSafetensorWriter:
         self.output_dir = Path(output_dir).expanduser().resolve()
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.max_shard_size = (
-            parse_size(max_shard_size)
-            if isinstance(max_shard_size, str)
-            else max_shard_size
+            parse_size(max_shard_size) if isinstance(max_shard_size, str) else max_shard_size
         )
         if self.max_shard_size <= 0:
             raise HuggingFaceIOError("max_shard_size must be positive")
@@ -127,8 +135,7 @@ class ShardedSafetensorWriter:
         if not self._current:
             return
         temporary_path = (
-            self.output_dir
-            / f"model-part-{len(self._temporary_files) + 1:05d}.safetensors"
+            self.output_dir / f"model-part-{len(self._temporary_files) + 1:05d}.safetensors"
         )
         if any(isinstance(tensor, RawEncoded) for tensor in self._current.values()):
             self._write_raw_shard(temporary_path)
@@ -147,20 +154,42 @@ class ShardedSafetensorWriter:
     def _write_raw_shard(self, path: Path) -> None:
         # Safetensors stores an eight-byte header length, padded JSON, then
         # contiguous payloads. No native E8M0/FP4 tensor or kernel is needed.
-        codes = {torch.bfloat16: "BF16", torch.float16: "F16", torch.float32: "F32",
-                 torch.int32: "I32", torch.int64: "I64", torch.int8: "I8", torch.uint8: "U8"}
+        codes = {
+            torch.bfloat16: "BF16",
+            torch.float16: "F16",
+            torch.float32: "F32",
+            torch.int32: "I32",
+            torch.int64: "I64",
+            torch.int8: "I8",
+            torch.uint8: "U8",
+        }
         header, offset = {"__metadata__": {"format": "pt"}}, 0
         for name, tensor in self._current.items():
             if isinstance(tensor, RawEncoded):
                 if tensor.tensor.dtype != torch.uint8:
                     raise HuggingFaceIOError(
-                        f"RawEncoded payload must be uint8 bytes: {name}: {tensor.tensor.dtype}")
-                code, shape, size = tensor.dtype_code, tuple(tensor.tensor.shape), tensor.tensor.numel()
+                        f"RawEncoded payload must be uint8 bytes: {name}: {tensor.tensor.dtype}"
+                    )
+                code, shape, size = (
+                    tensor.dtype_code,
+                    tuple(tensor.tensor.shape),
+                    tensor.tensor.numel(),
+                )
             else:
                 if tensor.dtype not in codes:
-                    raise HuggingFaceIOError(f"Unsupported dense dtype in raw shard: {name}: {tensor.dtype}")
-                code, shape, size = codes[tensor.dtype], tuple(tensor.shape), self._tensor_size(tensor)
-            header[name] = {"dtype": code, "shape": list(shape), "data_offsets": [offset, offset + size]}
+                    raise HuggingFaceIOError(
+                        f"Unsupported dense dtype in raw shard: {name}: {tensor.dtype}"
+                    )
+                code, shape, size = (
+                    codes[tensor.dtype],
+                    tuple(tensor.shape),
+                    self._tensor_size(tensor),
+                )
+            header[name] = {
+                "dtype": code,
+                "shape": list(shape),
+                "data_offsets": [offset, offset + size],
+            }
             offset += size
         encoded = json.dumps(header, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         encoded += b" " * (-len(encoded) % 8)
@@ -171,11 +200,11 @@ class ShardedSafetensorWriter:
                 if isinstance(tensor, RawEncoded):
                     data = tensor.tensor.reshape(-1)
                     for start in range(0, data.numel(), 8 * 1024**2):
-                        stream.write(data[start:start + 8 * 1024**2].numpy().tobytes())
+                        stream.write(data[start : start + 8 * 1024**2].numpy().tobytes())
                 else:
                     data = tensor.reshape(-1).view(torch.uint8)
                     for start in range(0, data.numel(), 8 * 1024**2):
-                        stream.write(data[start:start + 8 * 1024**2].numpy().tobytes())
+                        stream.write(data[start : start + 8 * 1024**2].numpy().tobytes())
 
     def finish(self) -> Path:
         self._flush()
@@ -184,9 +213,7 @@ class ShardedSafetensorWriter:
         count = len(self._temporary_files)
         renamed: dict[Path, Path] = {}
         for index, temporary_path in enumerate(self._temporary_files, start=1):
-            final_path = (
-                self.output_dir / f"model-{index:05d}-of-{count:05d}.safetensors"
-            )
+            final_path = self.output_dir / f"model-{index:05d}-of-{count:05d}.safetensors"
             temporary_path.replace(final_path)
             renamed[temporary_path] = final_path
         weight_map = {

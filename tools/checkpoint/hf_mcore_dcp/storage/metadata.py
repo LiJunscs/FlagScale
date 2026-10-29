@@ -1,6 +1,7 @@
 # Copyright 2026 FlagOS Contributors
 # Licensed under the Apache License, Version 2.0.
 """Inspect HF indexes/headers and MCore checkpoint metadata without constructing models."""
+
 from __future__ import annotations
 
 import json
@@ -24,7 +25,9 @@ def _unique_object(pairs):
 
 def read_safetensors_index(path):
     """Validate weight_map without opening shards or inferring shape/precision."""
-    payload = json.loads(Path(path).read_text(encoding="utf-8-sig"), object_pairs_hook=_unique_object)
+    payload = json.loads(
+        Path(path).read_text(encoding="utf-8-sig"), object_pairs_hook=_unique_object
+    )
     if not isinstance(payload, dict):
         raise ValueError("Safetensors index must be a JSON object")
     weights = payload.get("weight_map")
@@ -35,8 +38,14 @@ def read_safetensors_index(path):
             raise ValueError("Safetensors weight_map must map nonempty keys to shard filenames")
         posix = PurePosixPath(shard.replace("\\", "/"))
         windows = PureWindowsPath(shard)
-        if (posix.is_absolute() or windows.drive or windows.root or ".." in posix.parts
-                or posix.suffix != ".safetensors" or "\x00" in shard):
+        if (
+            posix.is_absolute()
+            or windows.drive
+            or windows.root
+            or ".." in posix.parts
+            or posix.suffix != ".safetensors"
+            or "\x00" in shard
+        ):
             raise ValueError(f"Invalid relative safetensors shard path: {shard!r}")
     return payload
 
@@ -74,8 +83,11 @@ class SafetensorMetadataReader:
         for filename in set(self._weight_map.values()):
             if not (self.model_dir / filename).resolve().is_relative_to(self.model_dir):
                 raise HuggingFaceIOError(f"Shard escapes HF directory: {filename}")
-        missing_files = sorted(filename for filename in set(self._weight_map.values())
-                               if not (self.model_dir / filename).is_file())
+        missing_files = sorted(
+            filename
+            for filename in set(self._weight_map.values())
+            if not (self.model_dir / filename).is_file()
+        )
         if missing_files:
             raise HuggingFaceIOError(f"Missing safetensors shards: {missing_files[:20]}")
         self._metadata = {}
@@ -117,15 +129,30 @@ class SafetensorMetadataReader:
         header.pop("__metadata__", None)
         data_size = file_size - 8 - length
         spans = []
-        byte_sizes = {"BF16": 2, "F16": 2, "F32": 4, "I32": 4, "I64": 8,
-                      "I8": 1, "U8": 1, "F8_E4M3": 1, "F8_E4M3FN": 1,
-                      "F8_E8M0": 1, "F8_E8M0FNU": 1}
+        byte_sizes = {
+            "BF16": 2,
+            "F16": 2,
+            "F32": 4,
+            "I32": 4,
+            "I64": 8,
+            "I8": 1,
+            "U8": 1,
+            "F8_E4M3": 1,
+            "F8_E4M3FN": 1,
+            "F8_E8M0": 1,
+            "F8_E8M0FNU": 1,
+        }
         for name, entry in header.items():
             if not isinstance(entry, dict):
                 raise HuggingFaceIOError(f"Invalid tensor metadata: {name}")
-            offsets, shape, dtype = (entry.get(field) for field in ("data_offsets", "shape", "dtype"))
-            if (not isinstance(offsets, list) or len(offsets) != 2
-                    or any(type(n) is not int for n in offsets)):
+            offsets, shape, dtype = (
+                entry.get(field) for field in ("data_offsets", "shape", "dtype")
+            )
+            if (
+                not isinstance(offsets, list)
+                or len(offsets) != 2
+                or any(type(n) is not int for n in offsets)
+            ):
                 raise HuggingFaceIOError(f"Invalid data offsets for {name}")
             begin, end = offsets
             if not (0 <= begin <= end <= data_size):
@@ -185,7 +212,8 @@ def resolve_iteration_dir(checkpoint_path: str | Path) -> Path:
             return candidate
         raise MappingError(f"Tracker points to an incomplete checkpoint: {candidate}")
     candidates = sorted(
-        item for item in path.glob("iter_*")
+        item
+        for item in path.glob("iter_*")
         if (item / ".metadata").is_file() and (item / "metadata.json").is_file()
     )
     if candidates:
@@ -218,7 +246,11 @@ def _plain(value):
         return {key: _plain(item) for key, item in value.items()}
     if type(value).__module__ == "torch" and type(value).__name__ in ("dtype", "device"):
         return str(value)
-    if callable(value) and getattr(value, "__module__", None) and getattr(value, "__qualname__", None):
+    if (
+        callable(value)
+        and getattr(value, "__module__", None)
+        and getattr(value, "__qualname__", None)
+    ):
         return {"callable": value.__module__ + "." + value.__qualname__}
     raise TypeError("Runtime-only configuration value")
 
@@ -244,9 +276,11 @@ def read_mcore_artifacts(path):
     # training runtime just to read them. Embedded common state uses MCore's reader.
     if (directory / "common.pt").is_file():
         import torch
+
         common = torch.load(directory / "common.pt", map_location="cpu", weights_only=False)
     else:
         from megatron.core.dist_checkpointing.serialization import load_common_state_dict
+
         common = load_common_state_dict(str(directory))
     if not isinstance(common, dict) or "args" not in common:
         raise MappingError("Existing MCore checkpoint must contain common state args")
@@ -256,20 +290,36 @@ def read_mcore_artifacts(path):
     content = common.get("content_metadata") or {}
     if not isinstance(content, dict):
         raise MappingError("MCore content_metadata must be a mapping")
-    if content.get("singleton_local_shards", False) or content.get("non_homogeneous_layers") is False:
+    if (
+        content.get("singleton_local_shards", False)
+        or content.get("non_homogeneous_layers") is False
+    ):
         raise MappingError("Only non-homogeneous, non-singleton DCP keys are supported")
     metadata = FileSystemReader(directory).read_metadata()
-    ignored = ("optimizer", "rng_state", "rerun_state_machine", "opt_param_scheduler",
-               "common_state", "num_floating_point_operations_so_far")
+    ignored = (
+        "optimizer",
+        "rng_state",
+        "rerun_state_machine",
+        "opt_param_scheduler",
+        "common_state",
+        "num_floating_point_operations_so_far",
+    )
     schema = {
         name: {"shape": list(entry.size), "dtype": str(entry.properties.dtype)}
         for name, entry in sorted(metadata.state_dict_metadata.items())
         if isinstance(entry, TensorStorageMetadata)
         and not is_extra_state(name)
-        and not any(name == prefix or name.startswith(prefix + ".") or name.startswith(prefix + "/")
-                    for prefix in ignored)
+        and not any(
+            name == prefix or name.startswith(prefix + ".") or name.startswith(prefix + "/")
+            for prefix in ignored
+        )
     }
     if not schema:
         raise MappingError("No MCore model tensor metadata was found")
-    return {"directory": str(directory), "args": values, "omitted_runtime_args": omitted,
-            "model_tensors": schema, "iteration": common.get("iteration")}
+    return {
+        "directory": str(directory),
+        "args": values,
+        "omitted_runtime_args": omitted,
+        "model_tensors": schema,
+        "iteration": common.get("iteration"),
+    }

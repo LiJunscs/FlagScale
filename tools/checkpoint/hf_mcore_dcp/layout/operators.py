@@ -1,6 +1,7 @@
 # Copyright 2026 FlagOS Contributors
 # Licensed under the Apache License, Version 2.0.
 """Common reversible layouts. Shape compatibility is not model equivalence."""
+
 from __future__ import annotations
 
 import torch
@@ -10,10 +11,15 @@ from .. import MappingError
 
 def transform(tensors, op, params, forward=True):
     allowed = {
-        "identity": set(), "concat": {"axis", "sizes"}, "split": {"axis", "sizes"},
-        "swiglu": set(), "stack": {"axis"}, "permute": {"dims"},
+        "identity": set(),
+        "concat": {"axis", "sizes"},
+        "split": {"axis", "sizes"},
+        "swiglu": set(),
+        "stack": {"axis"},
+        "permute": {"dims"},
         "reshape": {"hf_shape", "mcore_shape"},
-        "qkv": {"heads", "groups", "order", "output_gate"}, "expert_swiglu": set(),
+        "qkv": {"heads", "groups", "order", "output_gate"},
+        "expert_swiglu": set(),
         "packed_qkv": {"heads"},
     }
     if op not in allowed or not isinstance(params, dict) or params.keys() - allowed[op]:
@@ -63,7 +69,11 @@ def transform(tensors, op, params, forward=True):
                     raise MappingError("Split sizes must be positive integers")
                 if join and [t.shape[axis] for t in tensors] != sizes:
                     raise MappingError("Input dimensions differ from declared split sizes")
-            return [torch.cat(tensors, dim=axis)] if join else list(torch.split(single(), sizes, dim=axis))
+            return (
+                [torch.cat(tensors, dim=axis)]
+                if join
+                else list(torch.split(single(), sizes, dim=axis))
+            )
         if op == "stack":
             axis = params.get("axis", 0)
             return [torch.stack(tensors, dim=axis)] if forward else list(single().unbind(axis))
@@ -71,14 +81,29 @@ def transform(tensors, op, params, forward=True):
             if forward:
                 if len(tensors) % 2:
                     raise MappingError("expert_swiglu requires gate/up pairs")
-                return [torch.stack([transform(tensors[i:i + 2], "swiglu", {})[0]
-                                     for i in range(0, len(tensors), 2)], dim=0)]
-            return [part for expert in single().unbind(0)
-                    for part in transform([expert], "swiglu", {}, False)]
+                return [
+                    torch.stack(
+                        [
+                            transform(tensors[i : i + 2], "swiglu", {})[0]
+                            for i in range(0, len(tensors), 2)
+                        ],
+                        dim=0,
+                    )
+                ]
+            return [
+                part
+                for expert in single().unbind(0)
+                for part in transform([expert], "swiglu", {}, False)
+            ]
         if op == "qkv":
             heads, groups = params["heads"], params["groups"]
-            if (type(heads) is not int or type(groups) is not int
-                    or heads <= 0 or groups <= 0 or heads % groups):
+            if (
+                type(heads) is not int
+                or type(groups) is not int
+                or heads <= 0
+                or groups <= 0
+                or heads % groups
+            ):
                 raise MappingError("QKV heads must be a positive multiple of groups")
             order = params.get("order", ["q", "k", "v"])
             if sorted(order) != ["k", "q", "v"]:
@@ -92,35 +117,56 @@ def transform(tensors, op, params, forward=True):
                     if len(tensors) != 3:
                         raise MappingError("Gated QKV requires q/gate, k, v")
                     qz, k, v = tensors
-                    if (qz.shape[0] % (2 * heads) or k.shape != v.shape
-                            or k.shape[0] % groups
-                            or qz.shape[0] // (2 * heads) != k.shape[0] // groups):
+                    if (
+                        qz.shape[0] % (2 * heads)
+                        or k.shape != v.shape
+                        or k.shape[0] % groups
+                        or qz.shape[0] // (2 * heads) != k.shape[0] // groups
+                    ):
                         raise MappingError("Invalid gated QKV dimensions")
                     dim, tail = k.shape[0] // groups, qz.shape[1:]
                     qz = qz.reshape(groups, heads // groups, 2, dim, *tail)
                     q, z = qz.unbind(2)
-                    return [torch.cat([q.flatten(1, 2), z.flatten(1, 2),
-                                       k.reshape(groups, dim, *tail),
-                                       v.reshape(groups, dim, *tail)], dim=1).flatten(0, 1)]
+                    return [
+                        torch.cat(
+                            [
+                                q.flatten(1, 2),
+                                z.flatten(1, 2),
+                                k.reshape(groups, dim, *tail),
+                                v.reshape(groups, dim, *tail),
+                            ],
+                            dim=1,
+                        ).flatten(0, 1)
+                    ]
                 tensor = single()
                 if tensor.shape[0] % (2 * heads + 2 * groups):
                     raise MappingError("Invalid fused gated QKV row count")
                 dim = tensor.shape[0] // (2 * heads + 2 * groups)
                 tail = tensor.shape[1:]
                 q, z, k, v = tensor.reshape(groups, -1, *tail).split(
-                    [heads // groups * dim] * 2 + [dim] * 2, dim=1)
-                qz = torch.stack([q.reshape(heads, dim, *tail),
-                                   z.reshape(heads, dim, *tail)], dim=1).flatten(0, 2)
+                    [heads // groups * dim] * 2 + [dim] * 2, dim=1
+                )
+                qz = torch.stack(
+                    [q.reshape(heads, dim, *tail), z.reshape(heads, dim, *tail)], dim=1
+                ).flatten(0, 2)
                 return [qz, k.flatten(0, 1), v.flatten(0, 1)]
             if forward:
                 if len(tensors) != 3:
                     raise MappingError("qkv requires three tensors in HF order [q, k, v]")
                 q, k, v = tensors
-                if (q.shape[0] % heads or k.shape != v.shape or k.shape[0] % groups
-                        or q.shape[0] // heads != k.shape[0] // groups):
+                if (
+                    q.shape[0] % heads
+                    or k.shape != v.shape
+                    or k.shape[0] % groups
+                    or q.shape[0] // heads != k.shape[0] // groups
+                ):
                     raise MappingError("QKV dimensions cannot be grouped as requested")
-                parts = dict(zip(("q", "k", "v"),
-                                 [t.reshape(groups, t.shape[0] // groups, *t.shape[1:]) for t in tensors]))
+                parts = dict(
+                    zip(
+                        ("q", "k", "v"),
+                        [t.reshape(groups, t.shape[0] // groups, *t.shape[1:]) for t in tensors],
+                    )
+                )
                 return [torch.cat([parts[key] for key in order], dim=1).flatten(0, 1)]
             tensor = single()
             width = heads + 2 * groups
@@ -128,8 +174,16 @@ def transform(tensors, op, params, forward=True):
                 raise MappingError("Fused QKV rows cannot be split as requested")
             dim = tensor.shape[0] // width
             sizes = {"q": heads // groups * dim, "k": dim, "v": dim}
-            pieces = dict(zip(order, torch.split(
-                tensor.reshape(groups, -1, *tensor.shape[1:]), [sizes[key] for key in order], dim=1)))
+            pieces = dict(
+                zip(
+                    order,
+                    torch.split(
+                        tensor.reshape(groups, -1, *tensor.shape[1:]),
+                        [sizes[key] for key in order],
+                        dim=1,
+                    ),
+                )
+            )
             return [pieces[key].flatten(0, 1) for key in ("q", "k", "v")]
     except (RuntimeError, ValueError, IndexError, KeyError, TypeError) as error:
         raise MappingError(f"Cannot execute {op}: {error}") from error
