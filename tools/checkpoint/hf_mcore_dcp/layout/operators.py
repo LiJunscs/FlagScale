@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import torch
 
-from . import MappingError
+from .. import MappingError
 
 
 def transform(tensors, op, params, forward=True):
@@ -13,7 +13,8 @@ def transform(tensors, op, params, forward=True):
         "identity": set(), "concat": {"axis", "sizes"}, "split": {"axis", "sizes"},
         "swiglu": set(), "stack": {"axis"}, "permute": {"dims"},
         "reshape": {"hf_shape", "mcore_shape"},
-        "qkv": {"heads", "groups", "order"}, "expert_swiglu": set(),
+        "qkv": {"heads", "groups", "order", "output_gate"}, "expert_swiglu": set(),
+        "packed_qkv": {"heads"},
     }
     if op not in allowed or not isinstance(params, dict) or params.keys() - allowed[op]:
         raise MappingError(f"Unsupported operator or parameters: {op}: {params}")
@@ -30,6 +31,12 @@ def transform(tensors, op, params, forward=True):
     try:
         if op == "identity":
             return [single()]
+        if op == "packed_qkv":
+            tensor = single()
+            heads = params["heads"]
+            dim = tensor.shape[0] // (3 * heads)
+            shape = (3, heads, dim) if forward else (heads, 3, dim)
+            return [tensor.reshape(*shape, *tensor.shape[1:]).transpose(0, 1).reshape(tensor.shape)]
         if op == "permute":
             tensor = single()
             dims = params["dims"]
@@ -76,6 +83,35 @@ def transform(tensors, op, params, forward=True):
             order = params.get("order", ["q", "k", "v"])
             if sorted(order) != ["k", "q", "v"]:
                 raise MappingError("QKV order must contain q, k, v exactly once")
+            gated = params.get("output_gate", False)
+            if type(gated) is not bool or (gated and order != ["q", "k", "v"]):
+                raise MappingError("Gated QKV requires boolean output_gate and q,k,v order")
+            if gated:
+                # HF: per-head [q, gate]. MCore: per-group [all q, all gate, k, v].
+                if forward:
+                    if len(tensors) != 3:
+                        raise MappingError("Gated QKV requires q/gate, k, v")
+                    qz, k, v = tensors
+                    if (qz.shape[0] % (2 * heads) or k.shape != v.shape
+                            or k.shape[0] % groups
+                            or qz.shape[0] // (2 * heads) != k.shape[0] // groups):
+                        raise MappingError("Invalid gated QKV dimensions")
+                    dim, tail = k.shape[0] // groups, qz.shape[1:]
+                    qz = qz.reshape(groups, heads // groups, 2, dim, *tail)
+                    q, z = qz.unbind(2)
+                    return [torch.cat([q.flatten(1, 2), z.flatten(1, 2),
+                                       k.reshape(groups, dim, *tail),
+                                       v.reshape(groups, dim, *tail)], dim=1).flatten(0, 1)]
+                tensor = single()
+                if tensor.shape[0] % (2 * heads + 2 * groups):
+                    raise MappingError("Invalid fused gated QKV row count")
+                dim = tensor.shape[0] // (2 * heads + 2 * groups)
+                tail = tensor.shape[1:]
+                q, z, k, v = tensor.reshape(groups, -1, *tail).split(
+                    [heads // groups * dim] * 2 + [dim] * 2, dim=1)
+                qz = torch.stack([q.reshape(heads, dim, *tail),
+                                   z.reshape(heads, dim, *tail)], dim=1).flatten(0, 2)
+                return [qz, k.flatten(0, 1), v.flatten(0, 1)]
             if forward:
                 if len(tensors) != 3:
                     raise MappingError("qkv requires three tensors in HF order [q, k, v]")

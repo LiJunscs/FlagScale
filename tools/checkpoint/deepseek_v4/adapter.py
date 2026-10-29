@@ -27,7 +27,6 @@ def normalize_config(config, forward, keys):
             config["compress_ratios"] = list(config["compress_ratios"]) + [0] * config["num_nextn_predict_layers"]
         config.setdefault("n_shared_experts", 1)
         config.setdefault("tie_word_embeddings", False)
-        config.setdefault("make_vocab_size_divisible_by", 1)
         config.setdefault("moe_router_enable_expert_bias", any(k.endswith(".ffn.gate.bias") for k in keys))
         scaling = dict(config.get("rope_scaling") or {})
         scaling["rope_type"] = scaling.pop("type", scaling.get("rope_type", "rope"))
@@ -38,8 +37,6 @@ def normalize_config(config, forward, keys):
             scaling.setdefault("mscale_all_dim", 0.0)
         config["rope_scaling"] = scaling
     else:
-        if config.get("vocab_size") is None:
-            raise MappingError("DSv4 export needs the unpadded vocab_size; supply --vocab-size")
         config["moe_router_enable_expert_bias"] = bool(config.get("moe_router_enable_expert_bias")) or (
             config.get("moe_router_load_balancing_type") == "quantile_balancing")
         config["rope_type"] = config.get("rope_type") or "yarn"

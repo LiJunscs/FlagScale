@@ -1,13 +1,31 @@
-# DSv4 differences over the shared weight/parameter dictionaries.
-schema_version: 1
-extends: ../hf_mcore_dcp/mapping.yaml
+# DSv4 composes reusable structures; its adapter handles configuration conventions.
+schema_version: 2
 profile: deepseek_v4
 adapter: tools.checkpoint.deepseek_v4.adapter
-naming:
-  replace:
-    .indexer.weights_proj.: .indexer.scorer.weights_proj.
+parameters:
+- embedding
+- output_te
+- final_norm
+- separate_norms
+- mla_query
+- absorbed_kv
+- grouped_attention_output
+- moe
+- shared_experts
+- attention_sink
+- compressed_attention
+- sparse_indexer
+- hash_router
+- hyper_connections
+- hyper_connection_head
+- mtp_streams
+args:
+- rope
+- yarn
 quantization:
-  mxfp4: [layers.*.ffn.experts.*.w*.weight, mtp.*.ffn.experts.*.w*.weight]
+  mxfp4:
+  - layers.*.ffn.experts.*.w*.weight
+  - mtp.*.ffn.experts.*.w*.weight
 scopes:
   layer:
   - hf: layers.{layer}.
@@ -23,8 +41,6 @@ config_map:
   intermediate_size:
     mcore: ffn_hidden_size
     hf_default: null
-  head_dim: v_head_dim
-  sliding_window: csa_window_size
   num_nextn_predict_layers:
     mcore: mtp_num_layers
     hf_default: 0
@@ -48,32 +64,15 @@ config_map:
   swiglu_limit:
     mcore: activation_func_clamp_value
     hf_default: null
-  make_vocab_size_divisible_by:
-    mcore: make_vocab_size_divisible_by
-    hf_default: 1
 mcore_args:
-  actual_vocab_size: $hf.vocab_size
-  moe_shared_expert_intermediate_size:
-    op: mul
-    args: [$hf.n_shared_experts, $hf.moe_intermediate_size]
   untie_embeddings_and_output_weights:
     op: not
-    args: [$hf.tie_word_embeddings]
-  multi_latent_attention: true
-  qk_layernorm: true
+    args:
+    - $hf.tie_word_embeddings
   moe_layer_freq: 1
   experimental_attention_variant: dsv4_hybrid
-  enable_hyper_connections: true
   rotary_percent: 1.0
   rotary_interleaved: false
-  qk_head_dim:
-    op: sub
-    args: [$hf.head_dim, $hf.qk_rope_head_dim]
-  kv_lora_rank:
-    op: sub
-    args: [$hf.head_dim, $hf.qk_rope_head_dim]
-  kv_channels: $hf.head_dim
-  make_vocab_size_divisible_by: $hf.make_vocab_size_divisible_by
 hf_config:
   model_type: deepseek_v4
   hidden_act: silu
@@ -81,171 +80,3 @@ hf_config:
   num_key_value_heads: 1
   first_k_dense_replace: 0
   norm_topk_prob: true
-  n_shared_experts:
-    op: exactdiv
-    args: [$mcore.moe_shared_expert_intermediate_size, $mcore.moe_ffn_hidden_size]
-rules:
-- id: embedding
-  hf: [embed.weight]
-  mcore: [embedding.word_embeddings.weight]
-  export_slice:
-    axis: 0
-    size: $hf.vocab_size
-- id: output
-  hf: [head.weight]
-  mcore: [output_layer.weight]
-  extra_state: [output_layer._extra_state/shard_0_1]
-  export_slice:
-    axis: 0
-    size: $hf.vocab_size
-- id: head_fn
-  hf: [hc_head_fn]
-  mcore: [decoder.hc_head_fn]
-- id: head_base
-  hf: [hc_head_base]
-  mcore: [decoder.hc_head_base]
-- id: head_scale
-  hf: [hc_head_scale]
-  mcore: [decoder.hc_head_scale]
-- id: attn_norm
-  scope: layer
-  hf: [attn_norm.weight]
-  mcore: [input_layernorm.weight]
-- id: ffn_norm
-  scope: layer
-  hf: [ffn_norm.weight]
-  mcore: [pre_mlp_layernorm.weight]
-- id: sink
-  scope: layer
-  hf: [attn.attn_sink]
-  mcore: [self_attention.core_attention.attn_sink]
-- id: compress_kv
-  scope: layer
-  hf: [attn.compressor.wkv.weight]
-  mcore: [self_attention.core_attention.compressor.linear_wkv.weight]
-  optional: true
-  extra_state: [self_attention.core_attention.compressor.linear_wkv._extra_state/shard_0_1]
-- id: compress_gate
-  scope: layer
-  hf: [attn.compressor.wgate.weight]
-  mcore: [self_attention.core_attention.compressor.linear_wgate.weight]
-  optional: true
-  extra_state: [self_attention.core_attention.compressor.linear_wgate._extra_state/shard_0_1]
-- id: compress_ape
-  scope: layer
-  hf: [attn.compressor.ape]
-  mcore: [self_attention.core_attention.compressor.ape]
-  optional: true
-- id: compress_norm
-  scope: layer
-  hf: [attn.compressor.norm.weight]
-  mcore: [self_attention.core_attention.compressor.norm.weight]
-  optional: true
-- id: index_q
-  scope: layer
-  hf: [attn.indexer.wq_b.weight]
-  mcore: [self_attention.core_attention.indexer.linear_wq_b.weight]
-  optional: true
-  extra_state: [self_attention.core_attention.indexer.linear_wq_b._extra_state/shard_0_1]
-- id: index_score
-  scope: layer
-  hf: [attn.indexer.scorer.weights_proj.weight]
-  mcore: [self_attention.core_attention.indexer.linear_weights_proj.weight]
-  optional: true
-  extra_state: [self_attention.core_attention.indexer.linear_weights_proj._extra_state/shard_0_1]
-- id: index_compress_kv
-  scope: layer
-  hf: [attn.indexer.compressor.wkv.weight]
-  mcore: [self_attention.core_attention.indexer.compressor.linear_wkv.weight]
-  optional: true
-  extra_state: [self_attention.core_attention.indexer.compressor.linear_wkv._extra_state/shard_0_1]
-- id: index_compress_gate
-  scope: layer
-  hf: [attn.indexer.compressor.wgate.weight]
-  mcore: [self_attention.core_attention.indexer.compressor.linear_wgate.weight]
-  optional: true
-  extra_state: [self_attention.core_attention.indexer.compressor.linear_wgate._extra_state/shard_0_1]
-- id: index_compress_ape
-  scope: layer
-  hf: [attn.indexer.compressor.ape]
-  mcore: [self_attention.core_attention.indexer.compressor.ape]
-  optional: true
-- id: index_compress_norm
-  scope: layer
-  hf: [attn.indexer.compressor.norm.weight]
-  mcore: [self_attention.core_attention.indexer.compressor.norm.weight]
-  optional: true
-- id: hash_router
-  scope: layer
-  hf: [ffn.gate.tid2eid]
-  mcore: [mlp.router.tid2eid]
-  optional: true
-  export_slice:
-    axis: 0
-    size: $hf.vocab_size
-- id: hc_attn_fn
-  scope: layer
-  hf: [hc_attn_fn]
-  mcore: [self_attention_hyper_connection.mapping_proj.weight]
-- id: hc_attn_base
-  scope: layer
-  hf: [hc_attn_base]
-  mcore: [self_attention_hyper_connection.bias]
-- id: hc_attn_scale
-  scope: layer
-  hf: [hc_attn_scale]
-  mcore: [self_attention_hyper_connection.alpha_pre, self_attention_hyper_connection.alpha_post, self_attention_hyper_connection.alpha_res]
-  op: split
-  params:
-    axis: 0
-    sizes: [1, 1, 1]
-- id: hc_ffn_fn
-  scope: layer
-  hf: [hc_ffn_fn]
-  mcore: [mlp_hyper_connection.mapping_proj.weight]
-- id: hc_ffn_base
-  scope: layer
-  hf: [hc_ffn_base]
-  mcore: [mlp_hyper_connection.bias]
-- id: hc_ffn_scale
-  scope: layer
-  hf: [hc_ffn_scale]
-  mcore: [mlp_hyper_connection.alpha_pre, mlp_hyper_connection.alpha_post, mlp_hyper_connection.alpha_res]
-  op: split
-  params:
-    axis: 0
-    sizes: [1, 1, 1]
-- id: mtp_enorm
-  scope: mtp
-  hf: [enorm.weight]
-  mcore: [enorm.weight]
-- id: mtp_hnorm
-  scope: mtp
-  hf: [hnorm.weight]
-  mcore: [hnorm.weight]
-- id: mtp_norm
-  scope: mtp
-  hf: [norm.weight]
-  mcore: [final_layernorm.weight]
-- id: mtp_e_proj
-  scope: mtp
-  hf: [e_proj.weight]
-  mcore: [e_proj.weight]
-  extra_state: [e_proj._extra_state/shard_0_1]
-- id: mtp_h_proj
-  scope: mtp
-  hf: [h_proj.weight]
-  mcore: [h_proj.weight]
-  extra_state: [h_proj._extra_state/shard_0_1]
-- id: mtp_head_fn
-  scope: mtp
-  hf: [hc_head_fn]
-  mcore: [hc_head_fn]
-- id: mtp_head_base
-  scope: mtp
-  hf: [hc_head_base]
-  mcore: [hc_head_base]
-- id: mtp_head_scale
-  scope: mtp
-  hf: [hc_head_scale]
-  mcore: [hc_head_scale]
