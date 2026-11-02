@@ -248,13 +248,8 @@ def resolve_precision(
     device: str,
     *,
     to_mcore: bool,
-    storage_mode: str = "dense",
 ) -> PrecisionPolicy:
     """Decode quantized sources in FP32 unless a lower precision is explicitly requested."""
-    if storage_mode != "dense":
-        raise PrecisionError(
-            "Only ordinary tensor DCP is supported; preserved wrappers require training adapters"
-        )
     if requested not in {"auto", *DENSE_DTYPES}:
         raise PrecisionError(f"Unsupported dtype: {requested}")
     if device == "auto":

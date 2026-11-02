@@ -31,16 +31,20 @@ step; it cannot recover information already lost in the HF quantization.
 `--dtype auto` retains dense source dtypes and still decodes quantized inputs to
 FP32. Use `--dtype bf16` or `fp16` only when an explicit precision reduction is intended.
 
-Outputs contain ordinary DCP tensors and require no FlagScale low-precision
-loading adapters. The former `preserve` format is no longer emitted or loaded:
-its wrappers require training hooks, and are not native TE checkpoints. Native
-TE payload checkpoints are not supported by this entrypoint.
+Outputs contain ordinary dense DCP tensors and empty `_extra_state` placeholders
+in MCore's standard ShardedObject format. HF FP8/MXFP4 payloads are decoded using
+their source scales; packed TE payloads and source scales are not stored.
 
-Training quantization is selected by the training configuration. Removing the
-custom loading hooks does not fix the current upstream DCP partial-write path
-into FP8 primary parameters (`fp8-param-gather`); that path needs separate runtime
-validation. Saving FP32 weights also does not force an FP32 destination model
-or optimizer initialization when loading.
+Training selects the low-precision recipe and parameter type. MCore's native
+`force_all_tensors_to_non_fp8` load staging reads weights into dense tensors;
+TE's `load_state_dict` / `copy_` then quantizes them into the initialized target
+parameters. This converter has no TE dependency, recipe/version options, or
+custom training loading adapters. Delayed-scaling recipe state and calibration
+history are not supported or generated.
+
+Saving FP32 weights does not force an FP32 destination model or optimizer
+initialization. GPU numerical correctness and TP/EP resharding must be validated
+with the target training configuration.
 
 ## MCore → HF
 

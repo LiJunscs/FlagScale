@@ -117,9 +117,8 @@ def prepare(args):
         mc = translate_config(mapping, hf, True)
         if adapter and hasattr(adapter, "finish_config"):
             mc = adapter.finish_config(mc, True)
-        mode = args.conversion_mode or "dense"
         policy = resolve_precision(
-            original, hf, args.dtype, args.device, to_mcore=True, storage_mode=mode
+            original, hf, args.dtype, args.device, to_mcore=True
         )
         original.dtype, original.device = DENSE_DTYPES[policy.dtype], policy.device
         specs = {
@@ -195,9 +194,8 @@ def prepare(args):
             keys=set(output_specs),
             low_precision_kinds={s.kind for s in output_specs.values() if s.kind != "dense"},
         )
-        mode = "dense"
         policy = resolve_precision(
-            source, hf, args.dtype, args.device, to_mcore=False, storage_mode=mode
+            source, hf, args.dtype, args.device, to_mcore=False
         )
         zero_getter = None
     transforms = (
@@ -238,7 +236,6 @@ def prepare(args):
         report=report,
         shard_size=shard_size,
         zero_getter=zero_getter,
-        mode=mode,
         transforms=transforms,
         adapter=adapter,
     )
@@ -331,7 +328,6 @@ def build_parser():
         choices=("auto", "bf16", "fp16", "fp32"),
         help="Default: fp32 for HF import, auto for MCore export",
     )
-    parser.add_argument("--conversion-mode", choices=("dense",), default="dense")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--max-shard-size", default="4GB")
     parser.add_argument("--dry-run", action="store_true")
